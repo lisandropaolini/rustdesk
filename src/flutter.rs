@@ -22,7 +22,8 @@ pub(super) const APP_TYPE_DESKTOP_FILE_TRANSFER: &str = "file transfer";
 pub(super) const APP_TYPE_DESKTOP_PORT_FORWARD: &str = "port forward";
 
 lazy_static::lazy_static! {
-    pub static ref SESSIONS: RwLock<HashMap<String,Session<FlutterHandler>>> = Default::default();
+    static ref CUR_SESSION_ID: RwLock<String> = Default::default();
+    pub static ref SESSIONS: RwLock<HashMap<String, Session<FlutterHandler>>> = Default::default();
     pub static ref GLOBAL_EVENT_STREAM: RwLock<HashMap<String, StreamSink<String>>> = Default::default(); // rust to dart event channel
 }
 
@@ -310,7 +311,7 @@ impl InvokeUiSession for FlutterHandler {
         );
     }
 
-    fn msgbox(&self, msgtype: &str, title: &str, text: &str, retry: bool) {
+    fn msgbox(&self, msgtype: &str, title: &str, text: &str, link: &str, retry: bool) {
         let has_retry = if retry { "true" } else { "" };
         self.push_event(
             "msgbox",
@@ -318,6 +319,7 @@ impl InvokeUiSession for FlutterHandler {
                 ("type", msgtype),
                 ("title", title),
                 ("text", text),
+                ("link", link),
                 ("hasRetry", has_retry),
             ],
         );
@@ -416,6 +418,7 @@ pub fn session_start_(id: &str, event_stream: StreamSink<EventToUI>) -> ResultTy
 pub mod connection_manager {
     use std::collections::HashMap;
 
+    #[cfg(any(target_os = "android"))]
     use hbb_common::log;
     #[cfg(any(target_os = "android"))]
     use scrap::android::call_main_service_set_by_name;
@@ -562,4 +565,14 @@ pub fn make_fd_flutter(id: i32, entries: &Vec<FileEntry>, only_count: bool) -> S
     }
     m.insert("total_size".into(), json!(n as f64));
     serde_json::to_string(&m).unwrap_or("".into())
+}
+
+pub fn get_cur_session_id() -> String {
+    CUR_SESSION_ID.read().unwrap().clone()
+}
+
+pub fn set_cur_session_id(id: String) {
+    if get_cur_session_id() != id {
+        *CUR_SESSION_ID.write().unwrap() = id;
+    }
 }

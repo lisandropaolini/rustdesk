@@ -4,7 +4,9 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
+import 'package:get/get.dart';
 import 'package:wakelock/wakelock.dart';
+import 'package:window_manager/window_manager.dart';
 
 import '../common.dart';
 import '../common/formatter/id_formatter.dart';
@@ -36,6 +38,8 @@ class ServerModel with ChangeNotifier {
   final tabController = DesktopTabController(tabType: DesktopTabType.cm);
 
   final List<Client> _clients = [];
+
+  Timer? cmHiddenTimer;
 
   bool get isStart => _isStart;
 
@@ -92,6 +96,7 @@ class ServerModel with ChangeNotifier {
     _serverId = IDTextEditingController(text: _emptyIdShow);
 
     Timer.periodic(Duration(seconds: 1), (timer) async {
+      if (isTest) return timer.cancel();
       var status = await bind.mainGetOnlineStatue();
       if (status > 0) {
         status = 1;
@@ -343,6 +348,7 @@ class ServerModel with ChangeNotifier {
 
   // force
   updateClientState([String? json]) async {
+    if (isTest) return;
     var res = await bind.cmGetClientsState();
     try {
       final List clientsJson = jsonDecode(res);
@@ -351,13 +357,7 @@ class ServerModel with ChangeNotifier {
       for (var clientJson in clientsJson) {
         final client = Client.fromJson(clientJson);
         _clients.add(client);
-        tabController.add(
-            TabInfo(
-                key: client.id.toString(),
-                label: client.name,
-                closable: false,
-                page: Desktop.buildConnectionCard(client)),
-            authorized: client.authorized);
+        _addTab(client);
       }
       notifyListeners();
     } catch (e) {
@@ -382,13 +382,7 @@ class ServerModel with ChangeNotifier {
         }
         _clients.add(client);
       }
-      tabController.add(
-          TabInfo(
-              key: client.id.toString(),
-              label: client.name,
-              closable: false,
-              page: Desktop.buildConnectionCard(client)),
-          authorized: client.authorized);
+      _addTab(client);
       // remove disconnected
       final index_disconnected = _clients
           .indexWhere((c) => c.disconnected && c.peerId == client.peerId);
@@ -401,6 +395,32 @@ class ServerModel with ChangeNotifier {
       if (isAndroid && !client.authorized) showLoginDialog(client);
     } catch (e) {
       debugPrint("Failed to call loginRequest,error:$e");
+    }
+  }
+
+  void _addTab(Client client) {
+    tabController.add(TabInfo(
+        key: client.id.toString(),
+        label: client.name,
+        closable: false,
+        onTap: () {
+          if (client.hasUnreadChatMessage.value) {
+            client.hasUnreadChatMessage.value = false;
+            final chatModel = parent.target!.chatModel;
+            if (!chatModel.isShowChatPage) {
+              chatModel.toggleCMChatPage(client.id);
+            }
+          }
+        },
+        page: Desktop.buildConnectionCard(client)));
+    Future.delayed(Duration.zero, () async {
+      window_on_top(null);
+    });
+    if (client.authorized) {
+      cmHiddenTimer = Timer(const Duration(seconds: 3), () {
+        windowManager.minimize();
+        cmHiddenTimer = null;
+      });
     }
   }
 
@@ -528,6 +548,8 @@ class Client {
   bool recording = false;
   bool disconnected = false;
 
+  RxBool hasUnreadChatMessage = false.obs;
+
   Client(this.id, this.authorized, this.isFileTransfer, this.name, this.peerId,
       this.keyboard, this.clipboard, this.audio);
 
@@ -547,7 +569,7 @@ class Client {
   }
 
   Map<String, dynamic> toJson() {
-    final Map<String, dynamic> data = new Map<String, dynamic>();
+    final Map<String, dynamic> data = <String, dynamic>{};
     data['id'] = id;
     data['is_start'] = authorized;
     data['is_file_transfer'] = isFileTransfer;
@@ -556,6 +578,9 @@ class Client {
     data['keyboard'] = keyboard;
     data['clipboard'] = clipboard;
     data['audio'] = audio;
+    data['file'] = file;
+    data['restart'] = restart;
+    data['recording'] = recording;
     data['disconnected'] = disconnected;
     return data;
   }

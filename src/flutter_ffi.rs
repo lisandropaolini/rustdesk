@@ -7,13 +7,14 @@ use std::{
 use flutter_rust_bridge::{StreamSink, SyncReturn, ZeroCopyBuffer};
 use serde_json::json;
 
+use hbb_common::ResultType;
 use hbb_common::{
     config::{self, LocalConfig, PeerConfig, ONLINE},
     fs, log,
 };
-use hbb_common::{message_proto::Hash, ResultType};
 
 use crate::flutter::{self, SESSIONS};
+#[cfg(target_os = "android")]
 use crate::start_server;
 use crate::ui_interface::{self, *};
 use crate::{
@@ -183,6 +184,12 @@ pub fn session_get_custom_image_quality(id: String) -> Option<Vec<i32>> {
 pub fn session_set_custom_image_quality(id: String, value: i32) {
     if let Some(session) = SESSIONS.write().unwrap().get_mut(&id) {
         session.save_custom_image_quality(value);
+    }
+}
+
+pub fn session_set_custom_fps(id: String, fps: i32) {
+    if let Some(session) = SESSIONS.write().unwrap().get_mut(&id) {
+        session.set_custom_fps(fps);
     }
 }
 
@@ -356,7 +363,7 @@ pub fn session_create_dir(id: String, act_id: i32, path: String, is_remote: bool
     }
 }
 
-pub fn session_read_local_dir_sync(id: String, path: String, show_hidden: bool) -> String {
+pub fn session_read_local_dir_sync(_id: String, path: String, show_hidden: bool) -> String {
     if let Ok(fd) = fs::read_dir(&fs::get_path(&path), show_hidden) {
         return make_fd_to_json(fd.id, path, &fd.entries);
     }
@@ -797,8 +804,8 @@ pub fn main_is_root() -> bool {
     is_root()
 }
 
-pub fn main_is_release() -> bool {
-    is_release()
+pub fn get_double_click_time() -> SyncReturn<i32> {
+    SyncReturn(crate::platform::get_double_click_time() as _)
 }
 
 pub fn main_start_dbus_server() {
@@ -1000,6 +1007,10 @@ pub fn query_onlines(ids: Vec<String>) {
     crate::rendezvous_mediator::query_online_states(ids, handle_query_onlines)
 }
 
+pub fn version_to_number(v: String) -> i64 {
+    hbb_common::get_version_number(&v)
+}
+
 pub fn main_is_installed() -> SyncReturn<bool> {
     SyncReturn(is_installed())
 }
@@ -1040,6 +1051,10 @@ pub fn main_get_new_version() -> SyncReturn<String> {
 pub fn main_update_me() -> SyncReturn<bool> {
     update_me("".to_owned());
     SyncReturn(true)
+}
+
+pub fn set_cur_session_id(id: String) {
+    super::flutter::set_cur_session_id(id)
 }
 
 pub fn install_show_run_without_install() -> SyncReturn<bool> {

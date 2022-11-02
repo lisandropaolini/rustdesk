@@ -20,6 +20,7 @@ use hbb_common::{bail, log};
 use include_dir::{include_dir, Dir};
 use objc::{class, msg_send, sel, sel_impl};
 use scrap::{libc::c_void, quartz::ffi::*};
+use std::path::PathBuf;
 
 static PRIVILEGES_SCRIPTS_DIR: Dir =
     include_dir!("$CARGO_MANIFEST_DIR/src/platform/privileges_scripts");
@@ -374,6 +375,17 @@ pub fn get_active_userid() -> String {
     get_active_user("-n")
 }
 
+pub fn get_active_user_home() -> Option<PathBuf> {
+    let username = get_active_username();
+    if !username.is_empty() {
+        let home = PathBuf::from(format!("/Users/{}", username));
+        if home.exists() {
+            return Some(home);
+        }
+    }
+    None
+}
+
 pub fn is_prelogin() -> bool {
     get_active_userid() == "0"
 }
@@ -524,4 +536,10 @@ pub fn quit_gui() {
     unsafe {
         let () = msg_send!(NSApp(), terminate: nil);
     };
+}
+
+
+pub fn get_double_click_time() -> u32 {
+    // to-do: https://github.com/servo/core-foundation-rs/blob/786895643140fa0ee4f913d7b4aeb0c4626b2085/cocoa/src/appkit.rs#L2823
+    500 as _
 }

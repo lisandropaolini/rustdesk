@@ -14,9 +14,11 @@ import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/file_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
 import 'package:flutter_hbb/models/user_model.dart';
+import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tuple/tuple.dart';
+import 'package:image/image.dart' as img2;
 import 'package:flutter_custom_cursor/flutter_custom_cursor.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
@@ -28,7 +30,7 @@ import 'input_model.dart';
 import 'platform_model.dart';
 
 typedef HandleMsgBox = Function(Map<String, dynamic> evt, String id);
-bool _waitForImage = false;
+final _waitForImage = <String, bool>{};
 
 class FfiModel with ChangeNotifier {
   PeerInfo _pi = PeerInfo();
@@ -79,7 +81,10 @@ class FfiModel with ChangeNotifier {
       if (k == 'name' || k.isEmpty) return;
       _permissions[k] = v == 'true';
     });
-    KeyboardEnabledState.find(id).value = _permissions['keyboard'] != false;
+    // Only inited at remote page
+    if (desktopType == DesktopType.remote) {
+      KeyboardEnabledState.find(id).value = _permissions['keyboard'] != false;
+    }
     debugPrint('$_permissions');
     notifyListeners();
   }
@@ -89,7 +94,6 @@ class FfiModel with ChangeNotifier {
   clear() {
     _pi = PeerInfo();
     _display = Display();
-    _waitForImage = false;
     _secure = null;
     _direct = null;
     _inputBlocked = false;
@@ -178,8 +182,14 @@ class FfiModel with ChangeNotifier {
       } else if (name == 'update_privacy_mode') {
         updatePrivacyMode(evt, peerId);
       } else if (name == 'new_connection') {
-        final remoteId = evt['peer_id'];
-        rustDeskWinManager.newRemoteDesktop(remoteId);
+        var arg = evt['peer_id'].toString();
+        if (arg.startsWith(kUniLinksPrefix)) {
+          parseRustdeskUri(arg);
+        } else {
+          Future.delayed(Duration.zero, () {
+            rustDeskWinManager.newRemoteDesktop(arg);
+          });
+        }
       }
     };
   }
@@ -213,26 +223,28 @@ class FfiModel with ChangeNotifier {
   handleMsgBox(Map<String, dynamic> evt, String id) {
     if (parent.target == null) return;
     final dialogManager = parent.target!.dialogManager;
-    var type = evt['type'];
-    var title = evt['title'];
-    var text = evt['text'];
+    final type = evt['type'];
+    final title = evt['title'];
+    final text = evt['text'];
+    final link = evt['link'];
     if (type == 're-input-password') {
       wrongPasswordDialog(id, dialogManager);
     } else if (type == 'input-password') {
       enterPasswordDialog(id, dialogManager);
     } else if (type == 'restarting') {
-      showMsgBox(id, type, title, text, false, dialogManager, hasCancel: false);
+      showMsgBox(id, type, title, text, link, false, dialogManager,
+          hasCancel: false);
     } else {
       var hasRetry = evt['hasRetry'] == 'true';
-      showMsgBox(id, type, title, text, hasRetry, dialogManager);
+      showMsgBox(id, type, title, text, link, hasRetry, dialogManager);
     }
   }
 
   /// Show a message box with [type], [title] and [text].
-  showMsgBox(String id, String type, String title, String text, bool hasRetry,
-      OverlayDialogManager dialogManager,
+  showMsgBox(String id, String type, String title, String text, String link,
+      bool hasRetry, OverlayDialogManager dialogManager,
       {bool? hasCancel}) {
-    msgBox(type, title, text, dialogManager, hasCancel: hasCancel);
+    msgBox(type, title, text, link, dialogManager, hasCancel: hasCancel);
     _timer?.cancel();
     if (hasRetry) {
       _timer = Timer(Duration(seconds: _reconnects), () {
@@ -303,7 +315,7 @@ class FfiModel with ChangeNotifier {
         parent.target?.dialogManager.showLoading(
             translate('Connected, waiting for image...'),
             onCancel: closeConnection);
-        _waitForImage = true;
+        _waitForImage[peerId] = true;
         _reconnects = 1;
       }
     }
@@ -343,8 +355,8 @@ class ImageModel with ChangeNotifier {
   ImageModel(this.parent);
 
   onRgba(Uint8List rgba) {
-    if (_waitForImage) {
-      _waitForImage = false;
+    if (_waitForImage[id]!) {
+      _waitForImage[id] = false;
       parent.target?.dialogManager.dismissAll();
     }
     final pid = parent.target?.id;
@@ -472,9 +484,9 @@ class CanvasModel with ChangeNotifier {
   // image scale
   double _scale = 1.0;
   // the tabbar over the image
-  double tabBarHeight = 0.0;
+  // double tabBarHeight = 0.0;
   // the window border's width
-  double windowBorderWidth = 0.0;
+  // double windowBorderWidth = 0.0;
   // remote id
   String id = '';
   // scroll offset x percent
@@ -560,10 +572,15 @@ class CanvasModel with ChangeNotifier {
     return parent.target?.ffiModel.display.height ?? defaultHeight;
   }
 
+  double get windowBorderWidth => stateGlobal.windowBorderWidth;
+  double get tabBarHeight => stateGlobal.tabBarHeight;
+
   Size get size {
     final size = MediaQueryData.fromWindow(ui.window).size;
-    return Size(size.width - windowBorderWidth * 2,
-        size.height - tabBarHeight - windowBorderWidth * 2);
+    // If minimized, w or h may be negative here.
+    double w = size.width - windowBorderWidth * 2;
+    double h = size.height - tabBarHeight - windowBorderWidth * 2;
+    return Size(w < 0 ? 0 : w, h < 0 ? 0 : h);
   }
 
   moveDesktopMouse(double x, double y) {
@@ -655,15 +672,19 @@ class CanvasModel with ChangeNotifier {
 class CursorData {
   final String peerId;
   final int id;
-  final Uint8List? data;
-  final double hotx;
-  final double hoty;
+  final img2.Image? image;
+  double scale;
+  Uint8List? data;
+  double hotx;
+  double hoty;
   final int width;
   final int height;
 
   CursorData({
     required this.peerId,
     required this.id,
+    required this.image,
+    required this.scale,
     required this.data,
     required this.hotx,
     required this.hoty,
@@ -673,16 +694,46 @@ class CursorData {
 
   int _doubleToInt(double v) => (v * 10e6).round().toInt();
 
-  String key(double scale) =>
-      '${peerId}_${id}_${_doubleToInt(width * scale)}_${_doubleToInt(height * scale)}';
+  double _checkUpdateScale(double scale) {
+    // Update data if scale changed.
+    if (Platform.isWindows) {
+      final tgtWidth = (width * scale).toInt();
+      final tgtHeight = (width * scale).toInt();
+      if (tgtWidth < kMinCursorSize || tgtHeight < kMinCursorSize) {
+        double sw = kMinCursorSize.toDouble() / width;
+        double sh = kMinCursorSize.toDouble() / height;
+        scale = sw < sh ? sh : sw;
+      }
+      if (_doubleToInt(this.scale) != _doubleToInt(scale)) {
+        data = img2
+            .copyResize(
+              image!,
+              width: (width * scale).toInt(),
+              height: (height * scale).toInt(),
+            )
+            .getBytes(format: img2.Format.bgra);
+        hotx = (width * scale) / 2;
+        hoty = (height * scale) / 2;
+      }
+    }
+    this.scale = scale;
+    return scale;
+  }
+
+  String updateGetKey(double scale) {
+    scale = _checkUpdateScale(scale);
+    return '${peerId}_${id}_${_doubleToInt(width * scale)}_${_doubleToInt(height * scale)}';
+  }
 }
 
 class CursorModel with ChangeNotifier {
   ui.Image? _image;
   final _images = <int, Tuple3<ui.Image, double, double>>{};
-  CursorData? _cacheLinux;
-  final _cacheMapLinux = <int, CursorData>{};
-  final _cacheKeysLinux = <String>{};
+  CursorData? _cache;
+  final _defaultCacheId = -1;
+  CursorData? _defaultCache;
+  final _cacheMap = <int, CursorData>{};
+  final _cacheKeys = <String>{};
   double _x = -10000;
   double _y = -10000;
   double _hotx = 0;
@@ -693,7 +744,8 @@ class CursorModel with ChangeNotifier {
   WeakReference<FFI> parent;
 
   ui.Image? get image => _image;
-  CursorData? get cacheLinux => _cacheLinux;
+  CursorData? get cache => _cache;
+  CursorData? get defaultCache => _getDefaultCache();
 
   double get x => _x - _displayOriginX;
 
@@ -707,8 +759,31 @@ class CursorModel with ChangeNotifier {
 
   CursorModel(this.parent);
 
-  Set<String> get cachedKeysLinux => _cacheKeysLinux;
-  addKeyLinux(String key) => _cacheKeysLinux.add(key);
+  Set<String> get cachedKeys => _cacheKeys;
+  addKey(String key) => _cacheKeys.add(key);
+
+  CursorData? _getDefaultCache() {
+    if (_defaultCache == null) {
+      if (Platform.isWindows) {
+        Uint8List data = defaultCursorImage!.getBytes(format: img2.Format.bgra);
+        _hotx = defaultCursorImage!.width / 2;
+        _hoty = defaultCursorImage!.height / 2;
+
+        _defaultCache = CursorData(
+          peerId: id,
+          id: _defaultCacheId,
+          image: defaultCursorImage?.clone(),
+          scale: 1.0,
+          data: data,
+          hotx: _hotx,
+          hoty: _hoty,
+          width: defaultCursorImage!.width,
+          height: defaultCursorImage!.height,
+        );
+      }
+    }
+    return _defaultCache;
+  }
 
   // remote physical display coordinate
   Rect getVisibleRect() {
@@ -853,27 +928,48 @@ class CursorModel with ChangeNotifier {
   }
 
   _updateCacheLinux(ui.Image image, int id, int w, int h) async {
-    ByteData? data;
+    Uint8List? data;
+    img2.Image? image2;
     if (Platform.isWindows) {
-      data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      ByteData? data2 =
+          await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      if (data2 != null) {
+        data = data2.buffer.asUint8List();
+        image2 = img2.Image.fromBytes(w, h, data);
+      } else {
+        data = defaultCursorImage?.getBytes(format: img2.Format.bgra);
+        image2 = defaultCursorImage?.clone();
+        _hotx = defaultCursorImage!.width / 2;
+        _hoty = defaultCursorImage!.height / 2;
+      }
     } else {
-      data = await image.toByteData(format: ui.ImageByteFormat.png);
+      ByteData? data2 = await image.toByteData(format: ui.ImageByteFormat.png);
+      if (data2 != null) {
+        data = data2.buffer.asUint8List();
+      } else {
+        data = Uint8List.fromList(img2.encodePng(defaultCursorImage!));
+        _hotx = defaultCursorImage!.width / 2;
+        _hoty = defaultCursorImage!.height / 2;
+      }
     }
-    _cacheLinux = CursorData(
+
+    _cache = CursorData(
       peerId: this.id,
-      data: data?.buffer.asUint8List(),
       id: id,
+      image: image2,
+      scale: 1.0,
+      data: data,
       hotx: _hotx,
       hoty: _hoty,
       width: w,
       height: h,
     );
-    _cacheMapLinux[id] = _cacheLinux!;
+    _cacheMap[id] = _cache!;
   }
 
   updateCursorId(Map<String, dynamic> evt) async {
     final id = int.parse(evt['id']);
-    _cacheLinux = _cacheMapLinux[id];
+    _cache = _cacheMap[id];
     final tmp = _images[id];
     if (tmp != null) {
       _image = tmp.item1;
@@ -921,17 +1017,26 @@ class CursorModel with ChangeNotifier {
     _image = null;
     _images.clear();
 
-    _clearCacheLinux();
-    _cacheLinux = null;
-    _cacheMapLinux.clear();
+    _clearCache();
+    _cache = null;
+    _cacheMap.clear();
   }
 
-  _clearCacheLinux() {
-    final cachedKeys = {...cachedKeysLinux};
-    for (var key in cachedKeys) {
-      customCursorController.freeCache(key);
+  _clearCache() {
+    final keys = {...cachedKeys};
+    for (var k in keys) {
+      customCursorController.freeCache(k);
     }
   }
+
+  Uint8List? cachedForbidmemoryCursorData;
+  void updateForbiddenCursorBuffer() {
+    cachedForbidmemoryCursorData ??= base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAAAXNSR0IB2cksfwAAAAlwSFlzAAALEwAACxMBAJqcGAAAAkZQTFRFAAAA2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4G2B4GWAwCAAAAAAAA2B4GAAAAMTExAAAAAAAA2B4G2B4G2B4GAAAAmZmZkZGRAQEBAAAA2B4G2B4G2B4G////oKCgAwMDag8D2B4G2B4G2B4Gra2tBgYGbg8D2B4G2B4Gubm5CQkJTwsCVgwC2B4GxcXFDg4OAAAAAAAA2B4G2B4Gz8/PFBQUAAAAAAAA2B4G2B4G2B4G2B4G2B4G2B4G2B4GDgIA2NjYGxsbAAAAAAAA2B4GFwMB4eHhIyMjAAAAAAAA2B4G6OjoLCwsAAAAAAAA2B4G2B4G2B4G2B4G2B4GCQEA4ODgv7+/iYmJY2NjAgICAAAA9PT0Ojo6AAAAAAAAAAAA+/v7SkpKhYWFr6+vAAAAAAAA8/PzOTk5ERER9fX1KCgoAAAAgYGBKioqAAAAAAAApqamlpaWAAAAAAAAAAAAAAAAAAAAAAAALi4u/v7+GRkZAAAAAAAAAAAAAAAAAAAAfn5+AAAAAAAAV1dXkJCQAAAAAAAAAQEBAAAAAAAAAAAA7Hz6BAAAAMJ0Uk5TAAIWEwEynNz6//fVkCAatP2fDUHs6cDD8d0mPfT5fiEskiIR584A0gejr3AZ+P4plfALf5ZiTL85a4ziD6697fzN3UYE4v/4TwrNHuT///tdRKZh///+1U/ZBv///yjb///eAVL//50Cocv//6oFBbPvpGZCbfT//7cIhv///8INM///zBEcWYSZmO7//////1P////ts/////8vBv//////gv//R/z///QQz9sevP///2waXhNO/+fc//8mev/5gAe2r90MAAAByUlEQVR4nGNggANGJmYWBpyAlY2dg5OTi5uHF6s0H78AJxRwCAphyguLgKRExcQlQLSkFLq8tAwnp6ycPNABjAqKQKNElVDllVU4OVVhVquJA81Q10BRoAkUUYbJa4Edoo0sr6PLqaePLG/AyWlohKTAmJPTBFnelAFoixmSAnNOTgsUeQZLTk4rJAXWnJw2EHlbiDyDPCenHZICe04HFrh+RydnBgYWPU5uJAWinJwucPNd3dw9GDw5Ob2QFHBzcnrD7ffx9fMPCOTkDEINhmC4+3x8Q0LDwlEDIoKTMzIKKg9SEBIdE8sZh6SAJZ6Tkx0qD1YQkpCYlIwclCng0AXLQxSEpKalZyCryATKZwkhKQjJzsnNQ1KQXwBUUVhUXBJYWgZREFJeUVmFpMKlWg+anmqgCkJq6+obkG1pLEBTENLU3NKKrIKhrb2js8u4G6Kgpze0r3/CRAZMAHbkpJDJU6ZMmTqtFbuC6TNmhsyaMnsOFlmwgrnzpsxfELJwEXZ5Bp/FS3yWLlsesmLlKuwKVk9Ys5Zh3foN0zduwq5g85atDAzbpqSGbN9RhV0FGOzctWH3lD14FOzdt3H/gQw8Cg4u2gQPAwBYDXXdIH+wqAAAAABJRU5ErkJggg==');
+  }
+
+  img2.Image? defaultCursorImage = img2.decodePng(base64Decode(
+      'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAARzQklUCAgICHwIZIgAAAFmSURBVFiF7dWxSlxREMbx34QFDRowYBchZSxSCWlMCOwD5FGEFHap06UI7KPsAyyEEIQFqxRaCqYTsqCJFsKkuAeRXb17wrqV918dztw55zszc2fo6Oh47MR/e3zO1/iAHWmznHKGQwx9ip/LEbCfazbsoY8j/JLOhcC6sCW9wsjEwJf483AC9nPNc1+lFRwI13d+l3rYFS799rFGxJMqARv2pBXh+72XQ7gWvklPS7TmMl9Ak/M+DqrENvxAv/guKKApuKPWl0/TROK4+LbSqzhuB+OZ3fRSeFPWY+Fkyn56Y29hfgTSpnQ+s98cvorVey66uPlNFxKwZOYLCGfCs5n9NMYVrsp6mvXSoFqpqYFDvMBkStgJJe93dZOwVXxbqUnBENulydSReqUrDhcX0PT2EXarBYS3GNXMhboinBgIl9K71kg0L3+PvyYGdVpruT2MwrF0iotiXfIwus0Dj+OOjo6Of+e7ab74RkpgAAAAAElFTkSuQmCC'));
 }
 
 class QualityMonitorData {
@@ -987,16 +1092,16 @@ class RecordingModel with ChangeNotifier {
   get start => _start;
 
   onSwitchDisplay() {
-    if (!isDesktop || !_start) return;
+    if (isIOS || !_start) return;
     var id = parent.target?.id;
     int? width = parent.target?.canvasModel.getDisplayWidth();
-    int? height = parent.target?.canvasModel.getDisplayWidth();
+    int? height = parent.target?.canvasModel.getDisplayHeight();
     if (id == null || width == null || height == null) return;
     bind.sessionRecordScreen(id: id, start: true, width: width, height: height);
   }
 
   toggle() {
-    if (!isDesktop) return;
+    if (isIOS) return;
     var id = parent.target?.id;
     if (id == null) return;
     _start = !_start;
@@ -1009,7 +1114,7 @@ class RecordingModel with ChangeNotifier {
   }
 
   onClose() {
-    if (!isDesktop) return;
+    if (isIOS) return;
     var id = parent.target?.id;
     if (id == null) return;
     _start = false;

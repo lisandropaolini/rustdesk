@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart' hide MenuItem;
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/connection_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_setting_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
@@ -12,6 +13,7 @@ import 'package:flutter_hbb/desktop/widgets/scroll_wrapper.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
+import 'package:flutter_hbb/utils/tray_manager.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 import 'package:tray_manager/tray_manager.dart';
@@ -37,6 +39,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   @override
   bool get wantKeepAlive => true;
   var updateUrl = '';
+  StreamSubscription? _uniLinksSubscription;
 
   @override
   void onWindowClose() async {
@@ -376,7 +379,8 @@ class _DesktopHomePageState extends State<DesktopHomePage>
                         fontSize: 13),
                   ).marginOnly(bottom: 20),
                   Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                    Button(
+                    FixedWidthButton(
+                      width: 150,
                       padding: 8,
                       isOutline: true,
                       text: translate(btnText),
@@ -393,13 +397,28 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   }
 
   @override
+  void onTrayIconMouseDown() {
+    windowManager.show();
+  }
+
+  @override
+  void onTrayIconRightMouseDown() {
+    // linux does not support popup menu manually.
+    // linux will handle popup action ifself.
+    if (Platform.isMacOS || Platform.isWindows) {
+      trayManager.popUpContextMenu();
+    }
+  }
+
+  @override
   void onTrayMenuItemClick(MenuItem menuItem) {
-    debugPrint('click ${menuItem.key}');
     switch (menuItem.key) {
-      case "quit":
-        exit(0);
-      case "show":
-        // windowManager.show();
+      case kTrayItemQuitKey:
+        windowManager.close();
+        break;
+      case kTrayItemShowKey:
+        windowManager.show();
+        windowManager.focus();
         break;
       default:
         break;
@@ -409,19 +428,11 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   @override
   void initState() {
     super.initState();
-    Timer(const Duration(seconds: 1), () async {
-      final installed = bind.mainIsInstalled();
-      final root = await bind.mainIsRoot();
-      final release = await bind.mainIsRelease();
-      if (Platform.isWindows && release && !installed && !root) {
-        msgBox('custom-elevation-nocancel', 'Prompt', 'elevation_prompt',
-            gFFI.dialogManager);
-      }
-    });
     Timer(const Duration(seconds: 5), () async {
       updateUrl = await bind.mainGetSoftwareUpdateUrl();
       if (updateUrl.isNotEmpty) setState(() {});
     });
+    initTray();
     trayManager.addListener(this);
     windowManager.addListener(this);
     rustDeskWinManager.setMethodHandler((call, fromWindowId) async {
@@ -450,17 +461,22 @@ class _DesktopHomePageState extends State<DesktopHomePage>
             'scaleFactor': screen.scaleFactor,
           });
         }
+      } else if (call.method == kWindowActionRebuild) {
+        reloadCurrentWindow();
       }
     });
     Future.delayed(Duration.zero, () {
       checkArguments();
     });
+    _uniLinksSubscription = listenUniLinks();
   }
 
   @override
   void dispose() {
+    destoryTray();
     trayManager.removeListener(this);
     windowManager.removeListener(this);
+    _uniLinksSubscription?.cancel();
     super.dispose();
   }
 }

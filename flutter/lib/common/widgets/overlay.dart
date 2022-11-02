@@ -2,10 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:provider/provider.dart';
 
+import '../../consts.dart';
 import '../../desktop/widgets/tabbar_widget.dart';
-import '../../mobile/pages/chat_page.dart';
 import '../../models/chat_model.dart';
 import '../../models/model.dart';
+import 'chat_page.dart';
 
 class DraggableChatWindow extends StatelessWidget {
   const DraggableChatWindow(
@@ -36,7 +37,7 @@ class DraggableChatWindow extends StatelessWidget {
                   appBar: CustomAppBar(
                     onPanUpdate: onPanUpdate,
                     appBar: isDesktop
-                        ? _buildDesktopAppBar()
+                        ? _buildDesktopAppBar(context)
                         : _buildMobileAppBar(context),
                   ),
                   body: ChatPage(chatModel: chatModel),
@@ -82,33 +83,33 @@ class DraggableChatWindow extends StatelessWidget {
     );
   }
 
-  Widget _buildDesktopAppBar() {
+  Widget _buildDesktopAppBar(BuildContext context) {
     return Container(
-      color: MyTheme.accent50,
-      height: 35,
+      decoration: BoxDecoration(
+          border: Border(
+              bottom: BorderSide(
+                  color: Theme.of(context).hintColor.withOpacity(0.4)))),
+      height: 38,
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 15),
-              child: Text(
-                translate("Chat"),
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontFamily: 'WorkSans',
-                    fontWeight: FontWeight.bold),
-              )),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              ActionIcon(
+              padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
+              child: Row(children: [
+                Icon(Icons.chat_bubble_outline,
+                    size: 20, color: Theme.of(context).colorScheme.primary),
+                SizedBox(width: 6),
+                Text(translate("Chat"))
+              ])),
+          Padding(
+              padding: EdgeInsets.all(2),
+              child: ActionIcon(
                 message: 'Close',
                 icon: IconFont.close,
                 onTap: chatModel.hideChatWindowOverlay,
                 isClose: true,
-              )
-            ],
-          )
+                boxSize: 32,
+              ))
         ],
       ),
     );
@@ -173,17 +174,17 @@ class DraggableMobileActions extends StatelessWidget {
                         IconButton(
                             color: Colors.white,
                             onPressed: onBackPressed,
-                            splashRadius: 20,
+                            splashRadius: kDesktopIconButtonSplashRadius,
                             icon: const Icon(Icons.arrow_back)),
                         IconButton(
                             color: Colors.white,
                             onPressed: onHomePressed,
-                            splashRadius: 20,
+                            splashRadius: kDesktopIconButtonSplashRadius,
                             icon: const Icon(Icons.home)),
                         IconButton(
                             color: Colors.white,
                             onPressed: onRecentPressed,
-                            splashRadius: 20,
+                            splashRadius: kDesktopIconButtonSplashRadius,
                             icon: const Icon(Icons.more_horiz)),
                         const VerticalDivider(
                           width: 0,
@@ -194,7 +195,7 @@ class DraggableMobileActions extends StatelessWidget {
                         IconButton(
                             color: Colors.white,
                             onPressed: onHidePressed,
-                            splashRadius: 20,
+                            splashRadius: kDesktopIconButtonSplashRadius,
                             icon: const Icon(Icons.keyboard_arrow_down)),
                       ],
                     ),

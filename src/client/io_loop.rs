@@ -1,10 +1,13 @@
 use crate::client::{
-    Client, CodecFormat, FileManager, MediaData, MediaSender, QualityStatus, MILLI1, SEC30,
+    Client, CodecFormat, MediaData, MediaSender, QualityStatus, MILLI1, SEC30,
     SERVER_CLIPBOARD_ENABLED, SERVER_FILE_TRANSFER_ENABLED, SERVER_KEYBOARD_ENABLED,
 };
 use crate::common;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::common::{check_clipboard, update_clipboard, ClipboardContext, CLIPBOARD_INTERVAL};
+
+#[cfg(windows)]
+use clipboard::{cliprdr::CliprdrClientContext, ContextSend};
 
 use crate::ui_session_interface::{InvokeUiSession, Session};
 use crate::{client::Data, client::Interface};
@@ -12,7 +15,7 @@ use crate::{client::Data, client::Interface};
 use hbb_common::config::{PeerConfig, TransferSerde};
 use hbb_common::fs::{
     can_enable_overwrite_detection, get_job, get_string, new_send_confirm, DigestCheckResult,
-    RemoveJobMeta, TransferJobMeta,
+    RemoveJobMeta,
 };
 use hbb_common::message_proto::permission_info::Permission;
 use hbb_common::protobuf::Message as _;
@@ -20,9 +23,14 @@ use hbb_common::rendezvous_proto::ConnType;
 use hbb_common::tokio::{
     self,
     sync::mpsc,
+    sync::Mutex as TokioMutex,
     time::{self, Duration, Instant, Interval},
 };
-use hbb_common::{allow_err, message_proto::*, sleep};
+use hbb_common::{
+    allow_err,
+    message_proto::*,
+    sleep,
+};
 use hbb_common::{fs, log, Stream};
 use std::collections::HashMap;
 
@@ -43,7 +51,7 @@ pub struct Remote<T: InvokeUiSession> {
     last_update_jobs_status: (Instant, HashMap<i32, u64>),
     first_frame: bool,
     #[cfg(windows)]
-    clipboard_file_context: Option<Box<clipboard::cliprdr::CliprdrClientContext>>,
+    client_conn_id: i32, // used for clipboard
     data_count: Arc<AtomicUsize>,
     frame_count: Arc<AtomicUsize>,
     video_format: CodecFormat,
@@ -72,7 +80,7 @@ impl<T: InvokeUiSession> Remote<T> {
             last_update_jobs_status: (Instant::now(), Default::default()),
             first_frame: false,
             #[cfg(windows)]
-            clipboard_file_context: None,
+            client_conn_id: 0,
             data_count: Arc::new(AtomicUsize::new(0)),
             frame_count,
             video_format: CodecFormat::Unknown,
@@ -106,8 +114,23 @@ impl<T: InvokeUiSession> Remote<T> {
                 // just build for now
                 #[cfg(not(windows))]
                 let (_tx_holder, mut rx_clip_client) = mpsc::unbounded_channel::<i32>();
+
                 #[cfg(windows)]
-                let mut rx_clip_client = clipboard::get_rx_clip_client().lock().await;
+                let (_tx_holder, rx) = mpsc::unbounded_channel();
+                #[cfg(windows)]
+                let mut rx_clip_client_lock = Arc::new(TokioMutex::new(rx));
+                #[cfg(windows)]
+                {
+                    let is_conn_not_default = self.handler.is_file_transfer()
+                        || self.handler.is_port_forward()
+                        || self.handler.is_rdp();
+                    if !is_conn_not_default {
+                        (self.client_conn_id, rx_clip_client_lock) =
+                            clipboard::get_rx_cliprdr_client(&self.handler.id);
+                    };
+                }
+                #[cfg(windows)]
+                let mut rx_clip_client = rx_clip_client_lock.lock().await;
 
                 let mut status_timer = time::interval(Duration::new(1, 0));
 
@@ -119,7 +142,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                     Err(err) => {
                                         log::error!("Connection closed: {}", err);
                                         self.handler.set_force_relay(direct, received);
-                                        self.handler.msgbox("error", "Connection Error", &err.to_string());
+                                        self.handler.msgbox("error", "Connection Error", &err.to_string(), "");
                                         break;
                                     }
                                     Ok(ref bytes) => {
@@ -134,10 +157,10 @@ impl<T: InvokeUiSession> Remote<T> {
                             } else {
                                 if self.handler.is_restarting_remote_device() {
                                     log::info!("Restart remote device");
-                                    self.handler.msgbox("restarting", "Restarting Remote Device", "remote_restarting_tip");
+                                    self.handler.msgbox("restarting", "Restarting Remote Device", "remote_restarting_tip", "");
                                 } else {
                                     log::info!("Reset by the peer");
-                                    self.handler.msgbox("error", "Connection Error", "Reset by the peer");
+                                    self.handler.msgbox("error", "Connection Error", "Reset by the peer", "");
                                 }
                                 break;
                             }
@@ -152,7 +175,7 @@ impl<T: InvokeUiSession> Remote<T> {
                         _msg = rx_clip_client.recv() => {
                             #[cfg(windows)]
                             match _msg {
-                                Some((_, clip)) => {
+                                Some(clip) => {
                                     allow_err!(peer.send(&crate::clipboard_file::clip_2_msg(clip)).await);
                                 }
                                 None => {
@@ -162,12 +185,12 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                         _ = self.timer.tick() => {
                             if last_recv_time.elapsed() >= SEC30 {
-                                self.handler.msgbox("error", "Connection Error", "Timeout");
+                                self.handler.msgbox("error", "Connection Error", "Timeout", "");
                                 break;
                             }
                             if !self.read_jobs.is_empty() {
                                 if let Err(err) = fs::handle_read_jobs(&mut self.read_jobs, &mut peer).await {
-                                    self.handler.msgbox("error", "Connection Error", &err.to_string());
+                                    self.handler.msgbox("error", "Connection Error", &err.to_string(), "");
                                     break;
                                 }
                                 self.update_jobs_status();
@@ -191,7 +214,7 @@ impl<T: InvokeUiSession> Remote<T> {
             }
             Err(err) => {
                 self.handler
-                    .msgbox("error", "Connection Error", &err.to_string());
+                    .msgbox("error", "Connection Error", &err.to_string(), "");
             }
         }
         if let Some(stop) = stop_clipboard {
@@ -778,13 +801,7 @@ impl<T: InvokeUiSession> Remote<T> {
                 }
                 #[cfg(windows)]
                 Some(message::Union::Cliprdr(clip)) => {
-                    if !self.handler.lc.read().unwrap().disable_clipboard {
-                        if let Some(context) = &mut self.clipboard_file_context {
-                            if let Some(clip) = crate::clipboard_file::msg_2_clip(clip) {
-                                clipboard::server_clip_file(context, 0, clip);
-                            }
-                        }
-                    }
+                    self.handle_cliprdr_msg(clip);
                 }
                 Some(message::Union::FileResponse(fr)) => {
                     match fr.union {
@@ -971,7 +988,7 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                     }
                     Some(misc::Union::CloseReason(c)) => {
-                        self.handler.msgbox("error", "Connection Error", &c);
+                        self.handler.msgbox("error", "Connection Error", &c, "");
                         return false;
                     }
                     Some(misc::Union::BackNotification(notification)) => {
@@ -981,8 +998,12 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                     Some(misc::Union::Uac(uac)) => {
                         if uac {
-                            self.handler
-                                .msgbox("custom-uac-nocancel", "Warning", "uac_warning");
+                            self.handler.msgbox(
+                                "custom-uac-nocancel",
+                                "Warning",
+                                "uac_warning",
+                                "",
+                            );
                         }
                     }
                     Some(misc::Union::ForegroundWindowElevated(elevated)) => {
@@ -991,6 +1012,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                 "custom-elevated-foreground-nocancel",
                                 "Warning",
                                 "elevated_foreground_window_warning",
+                                "",
                             );
                         }
                     }
@@ -1012,6 +1034,19 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                     _ => {}
                 },
+                Some(message::Union::MessageBox(msgbox)) => {
+                    let mut link = msgbox.link;
+                    if !link.starts_with("rustdesk://") {
+                        if let Some(v) = hbb_common::config::HELPER_URL.get(&link as &str) {
+                            link = v.to_string();
+                        } else {
+                            log::warn!("Message box ignore link {} for security", &link);
+                            link = "".to_string();
+                        }
+                    }
+                    self.handler
+                        .msgbox(&msgbox.msgtype, &msgbox.title, &msgbox.text, &link);
+                }
                 _ => {}
             }
         }
@@ -1053,7 +1088,7 @@ impl<T: InvokeUiSession> Remote<T> {
             }
             back_notification::BlockInputState::BlkOnFailed => {
                 self.handler
-                    .msgbox("custom-error", "Block user input", "Failed");
+                    .msgbox("custom-error", "Block user input", "Failed", "");
                 self.update_block_input_state(false);
             }
             back_notification::BlockInputState::BlkOffSucceeded => {
@@ -1061,7 +1096,7 @@ impl<T: InvokeUiSession> Remote<T> {
             }
             back_notification::BlockInputState::BlkOffFailed => {
                 self.handler
-                    .msgbox("custom-error", "Unblock user input", "Failed");
+                    .msgbox("custom-error", "Unblock user input", "Failed", "");
             }
             _ => {}
         }
@@ -1086,51 +1121,52 @@ impl<T: InvokeUiSession> Remote<T> {
                     "error",
                     "Connecting...",
                     "Someone turns on privacy mode, exit",
+                    "",
                 );
                 return false;
             }
             back_notification::PrivacyModeState::PrvNotSupported => {
                 self.handler
-                    .msgbox("custom-error", "Privacy mode", "Unsupported");
+                    .msgbox("custom-error", "Privacy mode", "Unsupported", "");
                 self.update_privacy_mode(false);
             }
             back_notification::PrivacyModeState::PrvOnSucceeded => {
                 self.handler
-                    .msgbox("custom-nocancel", "Privacy mode", "In privacy mode");
+                    .msgbox("custom-nocancel", "Privacy mode", "In privacy mode", "");
                 self.update_privacy_mode(true);
             }
             back_notification::PrivacyModeState::PrvOnFailedDenied => {
                 self.handler
-                    .msgbox("custom-error", "Privacy mode", "Peer denied");
+                    .msgbox("custom-error", "Privacy mode", "Peer denied", "");
                 self.update_privacy_mode(false);
             }
             back_notification::PrivacyModeState::PrvOnFailedPlugin => {
                 self.handler
-                    .msgbox("custom-error", "Privacy mode", "Please install plugins");
+                    .msgbox("custom-error", "Privacy mode", "Please install plugins", "");
                 self.update_privacy_mode(false);
             }
             back_notification::PrivacyModeState::PrvOnFailed => {
                 self.handler
-                    .msgbox("custom-error", "Privacy mode", "Failed");
+                    .msgbox("custom-error", "Privacy mode", "Failed", "");
                 self.update_privacy_mode(false);
             }
             back_notification::PrivacyModeState::PrvOffSucceeded => {
                 self.handler
-                    .msgbox("custom-nocancel", "Privacy mode", "Out privacy mode");
+                    .msgbox("custom-nocancel", "Privacy mode", "Out privacy mode", "");
                 self.update_privacy_mode(false);
             }
             back_notification::PrivacyModeState::PrvOffByPeer => {
                 self.handler
-                    .msgbox("custom-error", "Privacy mode", "Peer exit");
+                    .msgbox("custom-error", "Privacy mode", "Peer exit", "");
                 self.update_privacy_mode(false);
             }
             back_notification::PrivacyModeState::PrvOffFailed => {
                 self.handler
-                    .msgbox("custom-error", "Privacy mode", "Failed to turn off");
+                    .msgbox("custom-error", "Privacy mode", "Failed to turn off", "");
             }
             back_notification::PrivacyModeState::PrvOffUnknown => {
                 self.handler
-                    .msgbox("custom-error", "Privacy mode", "Turned off");
+                    .msgbox("custom-error", "Privacy mode", "Turned off", "");
                 // log::error!("Privacy mode is turned off with unknown reason");
                 self.update_privacy_mode(false);
             }
@@ -1139,30 +1175,32 @@ impl<T: InvokeUiSession> Remote<T> {
         true
     }
 
-    fn check_clipboard_file_context(&mut self) {
+    fn check_clipboard_file_context(&self) {
         #[cfg(windows)]
         {
             let enabled = SERVER_FILE_TRANSFER_ENABLED.load(Ordering::SeqCst)
                 && self.handler.lc.read().unwrap().enable_file_transfer;
-            if enabled == self.clipboard_file_context.is_none() {
-                self.clipboard_file_context = if enabled {
-                    match clipboard::create_cliprdr_context(true, false) {
-                        Ok(context) => {
-                            log::info!("clipboard context for file transfer created.");
-                            Some(context)
-                        }
-                        Err(err) => {
-                            log::error!(
-                                "Create clipboard context for file transfer: {}",
-                                err.to_string()
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    log::info!("clipboard context for file transfer destroyed.");
-                    None
-                };
+            ContextSend::enable(enabled);
+        }
+    }
+
+    #[cfg(windows)]
+    fn handle_cliprdr_msg(&self, clip: hbb_common::message_proto::Cliprdr) {
+        if !self.handler.lc.read().unwrap().disable_clipboard {
+            #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
+            if let Some(hbb_common::message_proto::cliprdr::Union::FormatList(_)) = &clip.union {
+                if self.client_conn_id
+                    != clipboard::get_client_conn_id(&crate::flutter::get_cur_session_id())
+                        .unwrap_or(0)
+                {
+                    return;
+                }
+            }
+
+            if let Some(clip) = crate::clipboard_file::msg_2_clip(clip) {
+                ContextSend::proc(|context: &mut Box<CliprdrClientContext>| -> u32 {
+                    clipboard::server_clip_file(context, self.client_conn_id, clip)
+                });
             }
         }
     }

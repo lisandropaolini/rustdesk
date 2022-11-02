@@ -6,6 +6,7 @@ use crate::client::{
     load_config, send_mouse, start_video_audio_threads, FileManager, Key, LoginConfigHandler,
     QualityStatus, KEY_MAP, SERVER_KEYBOARD_ENABLED,
 };
+#[cfg(target_os = "linux")]
 use crate::common::IS_X11;
 use crate::{client::Data, client::Interface};
 use async_trait::async_trait;
@@ -132,6 +133,11 @@ impl<T: InvokeUiSession> Session<T> {
         if let Some(msg) = msg {
             self.send(Data::Message(msg));
         }
+    }
+
+    pub fn set_custom_fps(&mut self, custom_fps: i32) {
+        let msg = self.lc.write().unwrap().set_custom_fps(custom_fps);
+        self.send(Data::Message(msg));
     }
 
     pub fn get_remember(&self) -> bool {
@@ -807,6 +813,7 @@ impl<T: InvokeUiSession> Session<T> {
         let keycode: u32 = keycode as u32;
         let scancode: u32 = scancode as u32;
 
+        #[cfg(not(target_os = "windows"))]
         let key = rdev::key_from_scancode(scancode) as RdevKey;
         // Windows requires special handling
         #[cfg(target_os = "windows")]
@@ -1088,7 +1095,7 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn job_progress(&self, id: i32, file_num: i32, speed: f64, finished_size: f64);
     fn adapt_size(&self);
     fn on_rgba(&self, data: &[u8]);
-    fn msgbox(&self, msgtype: &str, title: &str, text: &str, retry: bool);
+    fn msgbox(&self, msgtype: &str, title: &str, text: &str, link: &str, retry: bool);
     #[cfg(any(target_os = "android", target_os = "ios"))]
     fn clipboard(&self, content: String);
 }
@@ -1137,9 +1144,9 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         self.lc.read().unwrap().conn_type.eq(&ConnType::RDP)
     }
 
-    fn msgbox(&self, msgtype: &str, title: &str, text: &str) {
+    fn msgbox(&self, msgtype: &str, title: &str, text: &str, link: &str) {
         let retry = check_if_retry(msgtype, title, text);
-        self.ui_handler.msgbox(msgtype, title, text, retry);
+        self.ui_handler.msgbox(msgtype, title, text, link, retry);
     }
 
     fn handle_login_error(&mut self, err: &str) -> bool {
@@ -1164,7 +1171,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
             if pi.displays.is_empty() {
                 self.lc.write().unwrap().handle_peer_info(&pi);
                 self.update_privacy_mode();
-                self.msgbox("error", "Remote Error", "No Display");
+                self.msgbox("error", "Remote Error", "No Display", "");
                 return;
             }
             let p = self.lc.read().unwrap().should_auto_login();
@@ -1181,7 +1188,12 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         if self.is_file_transfer() {
             self.close_success();
         } else if !self.is_port_forward() {
-            self.msgbox("success", "Successful", "Connected, waiting for image...");
+            self.msgbox(
+                "success",
+                "Successful",
+                "Connected, waiting for image...",
+                "",
+            );
         }
         #[cfg(windows)]
         {

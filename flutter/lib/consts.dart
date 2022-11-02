@@ -9,8 +9,15 @@ const String kAppTypeDesktopRemote = "remote";
 const String kAppTypeDesktopFileTransfer = "file transfer";
 const String kAppTypeDesktopPortForward = "port forward";
 
+const String kWindowActionRebuild = "rebuild";
+
+const String kUniLinksPrefix = "rustdesk://";
+const String kActionNewConnection = "connection/new/";
+
 const String kTabLabelHomePage = "Home";
 const String kTabLabelSettingPage = "Settings";
+
+const String kWindowPrefix = "wm_";
 
 const Color kColorWarn = Color.fromARGB(255, 245, 133, 59);
 
@@ -30,6 +37,10 @@ const Size kConnectionManagerWindowSize = Size(300, 400);
 // Tabbar transition duration, now we remove the duration
 const Duration kTabTransitionDuration = Duration.zero;
 const double kEmptyMarginTop = 50;
+const double kDesktopIconButtonSplashRadius = 20;
+
+/// [kMinCursorSize] indicates min cursor (w, h)
+const int kMinCursorSize = 24;
 
 /// [kDefaultScrollAmountMultiplier] indicates how many rows can be scrolled after a minimum scroll action of mouse
 const kDefaultScrollAmountMultiplier = 5.0;

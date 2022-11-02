@@ -190,7 +190,8 @@ pub async fn set_uinput() -> ResultType<()> {
     let mouse = super::uinput::client::UInputMouse::new().await?;
     log::info!("UInput mouse created");
 
-    let mut en = ENIGO.lock().unwrap();
+    let xxx = ENIGO.lock();
+    let mut en = xxx.unwrap();
     en.set_uinput_keyboard(Some(Box::new(keyboard)));
     en.set_uinput_mouse(Some(Box::new(mouse)));
     Ok(())
@@ -639,11 +640,32 @@ fn sync_status(evt: &KeyEvent) -> (bool, bool) {
         || (!caps_locking && en.get_key_state(enigo::Key::CapsLock));
     let click_numlock = (num_locking && !en.get_key_state(enigo::Key::NumLock))
         || (!num_locking && en.get_key_state(enigo::Key::NumLock));
+    #[cfg(windows)]
+    let click_numlock = {
+        let code = evt.chr();
+        let key = rdev::get_win_key(code, 0);
+        match key {
+            RdevKey::Home |
+            RdevKey::UpArrow |
+            RdevKey::PageUp |
+            RdevKey::LeftArrow |
+            RdevKey::RightArrow |
+            RdevKey::End |
+            RdevKey::DownArrow |
+            RdevKey::PageDown |
+            RdevKey::Insert | 
+            RdevKey::Delete => en.get_key_state(enigo::Key::NumLock),
+            _ => click_numlock,
+        }
+    };   
     return (click_capslock, click_numlock);
 }
 
 fn map_keyboard_mode(evt: &KeyEvent) {
     // map mode(1): Send keycode according to the peer platform.
+    #[cfg(windows)]
+    crate::platform::windows::try_change_desktop();
+
     let (click_capslock, click_numlock) = sync_status(evt);
 
     // Wayland
@@ -703,7 +725,7 @@ fn legacy_keyboard_mode(evt: &KeyEvent) {
     // disable numlock if press home etc when numlock is on,
     // because we will get numpad value (7,8,9 etc) if not
     #[cfg(windows)]
-    let mut disable_numlock = false;
+    let mut _disable_numlock = false;
     #[cfg(target_os = "macos")]
     en.reset_flag();
     // When long-pressed the command key, then press and release
@@ -753,8 +775,8 @@ fn legacy_keyboard_mode(evt: &KeyEvent) {
             if let Some(key) = KEY_MAP.get(&ck.value()) {
                 #[cfg(windows)]
                 if let Some(_) = NUMPAD_KEY_MAP.get(&ck.value()) {
-                    disable_numlock = en.get_key_state(Key::NumLock);
-                    if disable_numlock {
+                    _disable_numlock = en.get_key_state(Key::NumLock);
+                    if _disable_numlock {
                         en.key_down(Key::NumLock).ok();
                         en.key_up(Key::NumLock);
                     }

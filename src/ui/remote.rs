@@ -14,18 +14,10 @@ use sciter::{
     Value,
 };
 
-#[cfg(windows)]
-use clipboard::{
-    cliprdr::CliprdrClientContext, create_cliprdr_context as create_clipboard_file_context,
-    get_rx_clip_client, server_clip_file,
-};
-
 use hbb_common::{
     allow_err, fs::TransferJobMeta, log, message_proto::*, rendezvous_proto::ConnType,
 };
 
-#[cfg(windows)]
-use crate::clipboard_file::*;
 use crate::{
     client::*,
     ui_interface::has_hwcodec,
@@ -238,8 +230,8 @@ impl InvokeUiSession for SciterHandler {
         self.call("updatePi", &make_args!(pi_sciter));
     }
 
-    fn msgbox(&self, msgtype: &str, title: &str, text: &str, retry: bool) {
-        self.call2("msgbox_retry", &make_args!(msgtype, title, text, retry));
+    fn msgbox(&self, msgtype: &str, title: &str, text: &str, link: &str, retry: bool) {
+        self.call2("msgbox_retry", &make_args!(msgtype, title, text, link, retry));
     }
 
     fn new_message(&self, msg: String) {

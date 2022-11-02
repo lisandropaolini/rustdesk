@@ -4,7 +4,7 @@ import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:provider/provider.dart';
 
-import 'home_page.dart';
+import '../../mobile/pages/home_page.dart';
 
 class ChatPage extends StatelessWidget implements PageShape {
   late final ChatModel chatModel;
@@ -61,22 +61,42 @@ class ChatPage extends StatelessWidget implements PageShape {
                           [],
                       inputOptions: InputOptions(
                           sendOnEnter: true,
-                          inputDecoration: defaultInputDecoration(
-                              hintText: "${translate('Write a message')}...",
-                              fillColor: Theme.of(context).backgroundColor),
-                          sendButtonBuilder: defaultSendButton(
-                              color: Theme.of(context)
-                                  .textTheme
-                                  .titleLarge!
-                                  .color!),
+                          focusNode: chatModel.inputNode,
                           inputTextStyle: TextStyle(
+                              fontSize: 14,
                               color: Theme.of(context)
                                   .textTheme
                                   .titleLarge
-                                  ?.color)),
+                                  ?.color),
+                          inputDecoration: isDesktop
+                              ? InputDecoration(
+                                  isDense: true,
+                                  hintText:
+                                      "${translate('Write a message')}...",
+                                  filled: true,
+                                  fillColor: Theme.of(context).backgroundColor,
+                                  contentPadding: EdgeInsets.all(10),
+                                  border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(6),
+                                    borderSide: const BorderSide(
+                                      width: 0,
+                                      style: BorderStyle.none,
+                                    ),
+                                  ),
+                                )
+                              : defaultInputDecoration(
+                                  hintText:
+                                      "${translate('Write a message')}...",
+                                  fillColor: Theme.of(context).backgroundColor),
+                          sendButtonBuilder: defaultSendButton(
+                              padding: EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 0),
+                              color: Theme.of(context).colorScheme.primary)),
                       messageOptions: MessageOptions(
                           showOtherUsersAvatar: false,
                           showTime: true,
+                          currentUserTextColor: Colors.white,
+                          textColor: Colors.white,
                           maxWidth: constraints.maxWidth * 0.7,
                           messageDecorationBuilder: (_, __, ___) =>
                               defaultMessageDecoration(

@@ -15,7 +15,7 @@ use hbb_common::{
     protobuf::Message as _,
     rendezvous_proto::*,
     tcp::FramedStream,
-    tokio::{self, sync::mpsc, time},
+    tokio::{self, sync::mpsc},
 };
 
 use crate::common::get_app_name;
@@ -53,11 +53,8 @@ fn check_connect_status(
 ) {
     let status = Arc::new(Mutex::new((0, false, 0, "".to_owned())));
     let options = Arc::new(Mutex::new(Config::get_options()));
-    let cloned = status.clone();
-    let cloned_options = options.clone();
     let (tx, rx) = mpsc::unbounded_channel::<ipc::Data>();
     let password = Arc::new(Mutex::new(String::default()));
-    let cloned_password = password.clone();
     std::thread::spawn(move || crate::ui_interface::check_connect_status_(reconnect, rx));
     (status, options, tx, password)
 }
@@ -91,11 +88,6 @@ pub fn start(args: &mut [String]) {
     #[cfg(all(windows, not(feature = "inline")))]
     unsafe {
         winapi::um::shellscalingapi::SetProcessDpiAwareness(2);
-    }
-    #[cfg(windows)]
-    if args.len() > 0 && args[0] == "--tray" {
-        crate::tray::start_tray(crate::ui_interface::OPTIONS.clone());
-        return;
     }
     use sciter::SCRIPT_RUNTIME_FEATURES::*;
     allow_err!(sciter::set_options(sciter::RuntimeOptions::ScriptFeatures(
@@ -514,17 +506,17 @@ impl UI {
     }
 
     fn get_lan_peers(&self) -> String {
-        let peers = get_lan_peers()
-            .into_iter()
-            .map(|mut peer| {
-                (
-                    peer.remove("id").unwrap_or_default(),
-                    peer.remove("username").unwrap_or_default(),
-                    peer.remove("hostname").unwrap_or_default(),
-                    peer.remove("platform").unwrap_or_default(),
-                )
-            })
-            .collect::<Vec<(String, String, String, String)>>();
+        // let peers = get_lan_peers()
+        //     .into_iter()
+        //     .map(|mut peer| {
+        //         (
+        //             peer.remove("id").unwrap_or_default(),
+        //             peer.remove("username").unwrap_or_default(),
+        //             peer.remove("hostname").unwrap_or_default(),
+        //             peer.remove("platform").unwrap_or_default(),
+        //         )
+        //     })
+        //     .collect::<Vec<(String, String, String, String)>>();
         serde_json::to_string(&get_lan_peers()).unwrap_or_default()
     }
 
