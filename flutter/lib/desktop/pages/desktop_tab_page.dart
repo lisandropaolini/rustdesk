@@ -31,7 +31,7 @@ class DesktopTabPage extends StatefulWidget {
             initialPage: initialPage,
           )));
     } catch (e) {
-      debugPrint('$e');
+      debugPrintStack(label: '$e');
     }
   }
 }
@@ -64,24 +64,18 @@ class _DesktopTabPageState extends State<DesktopTabPage> {
   @override
   Widget build(BuildContext context) {
     final tabWidget = Container(
-      child: Overlay(initialEntries: [
-        OverlayEntry(builder: (context) {
-          gFFI.dialogManager.setOverlayState(Overlay.of(context));
-          return Scaffold(
-              backgroundColor: Theme.of(context).backgroundColor,
-              body: DesktopTab(
-                controller: tabController,
-                tail: ActionIcon(
-                  message: 'Settings',
-                  icon: IconFont.menu,
-                  onTap: DesktopTabPage.onAddSetting,
-                  isClose: false,
-                ),
-              ));
-        })
-      ]),
-    );
-    return Platform.isMacOS
+        child: Scaffold(
+            backgroundColor: Theme.of(context).colorScheme.background,
+            body: DesktopTab(
+              controller: tabController,
+              tail: ActionIcon(
+                message: 'Settings',
+                icon: IconFont.menu,
+                onTap: DesktopTabPage.onAddSetting,
+                isClose: false,
+              ),
+            )));
+    return Platform.isMacOS || kUseCompatibleUiMode
         ? tabWidget
         : Obx(
             () => DragToResizeArea(

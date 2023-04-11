@@ -1,7 +1,9 @@
-use crate::{x11, common::TraitCapturer};
+use crate::{common::TraitCapturer, x11};
 use std::{io, ops, time::Duration};
 
 pub struct Capturer(x11::Capturer);
+
+pub const IS_CURSOR_EMBEDDED: bool = false;
 
 impl Capturer {
     pub fn new(display: Display, yuv: bool) -> io::Result<Capturer> {
@@ -27,7 +29,7 @@ impl TraitCapturer for Capturer {
     }
 }
 
-pub struct Frame<'a>(pub(crate) &'a [u8]);
+pub struct Frame<'a>(pub &'a [u8]);
 
 impl<'a> ops::Deref for Frame<'a> {
     type Target = [u8];
@@ -88,6 +90,6 @@ impl Display {
     }
 
     pub fn name(&self) -> String {
-        "".to_owned()
+        self.0.name()
     }
 }

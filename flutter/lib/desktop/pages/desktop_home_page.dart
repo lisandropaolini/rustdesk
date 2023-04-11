@@ -2,9 +2,11 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
 
-import 'package:flutter/material.dart' hide MenuItem;
+import 'package:auto_size_text/auto_size_text.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/widgets/custom_password.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/connection_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_setting_page.dart';
@@ -13,11 +15,8 @@ import 'package:flutter_hbb/desktop/widgets/scroll_wrapper.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
-import 'package:flutter_hbb/utils/tray_manager.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
-import 'package:tray_manager/tray_manager.dart';
-import 'package:window_manager/window_manager.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:window_size/window_size.dart' as window_size;
 
@@ -33,32 +32,20 @@ class DesktopHomePage extends StatefulWidget {
 const borderColor = Color(0xFF2F65BA);
 
 class _DesktopHomePageState extends State<DesktopHomePage>
-    with TrayListener, WindowListener, AutomaticKeepAliveClientMixin {
+    with AutomaticKeepAliveClientMixin {
   final _leftPaneScrollController = ScrollController();
 
   @override
   bool get wantKeepAlive => true;
   var updateUrl = '';
+  var systemError = '';
   StreamSubscription? _uniLinksSubscription;
-
-  @override
-  void onWindowClose() async {
-    super.onWindowClose();
-    // close all sub windows
-    if (await windowManager.isPreventClose()) {
-      try {
-        await Future.wait([
-          saveWindowPosition(WindowType.Main),
-          rustDeskWinManager.closeAllSubWindows()
-        ]);
-      } catch (err) {
-        debugPrint("$err");
-      } finally {
-        await windowManager.setPreventClose(false);
-        await windowManager.close();
-      }
-    }
-  }
+  var svcStopped = false.obs;
+  var watchIsCanScreenRecording = false;
+  var watchIsProcessTrust = false;
+  var watchIsInputMonitoring = false;
+  var watchIsCanRecordAudio = false;
+  Timer? _updateTimer;
 
   @override
   Widget build(BuildContext context) {
@@ -67,10 +54,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         buildLeftPane(context),
-        const VerticalDivider(
-          width: 1,
-          thickness: 1,
-        ),
+        const VerticalDivider(width: 1),
         Expanded(
           child: buildRightPane(context),
         ),
@@ -83,17 +67,27 @@ class _DesktopHomePageState extends State<DesktopHomePage>
       value: gFFI.serverModel,
       child: Container(
         width: 200,
-        color: Theme.of(context).backgroundColor,
+        color: Theme.of(context).colorScheme.background,
         child: DesktopScrollWrapper(
           scrollController: _leftPaneScrollController,
           child: SingleChildScrollView(
             controller: _leftPaneScrollController,
+            physics: DraggableNeverScrollableScrollPhysics(),
             child: Column(
               children: [
                 buildTip(context),
                 buildIDBoard(context),
                 buildPasswordBoard(context),
-                buildHelpCards(),
+                FutureBuilder<Widget>(
+                  future: buildHelpCards(),
+                  builder: (_, data) {
+                    if (data.hasData) {
+                      return data.data!;
+                    } else {
+                      return const Offstage();
+                    }
+                  },
+                ),
               ],
             ),
           ),
@@ -160,7 +154,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
                         readOnly: true,
                         decoration: InputDecoration(
                           border: InputBorder.none,
-                          contentPadding: EdgeInsets.only(bottom: 20),
+                          contentPadding: EdgeInsets.only(top: 10, bottom: 10),
                         ),
                         style: TextStyle(
                           fontSize: 22,
@@ -187,7 +181,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           radius: 15,
           backgroundColor: hover.value
               ? Theme.of(context).scaffoldBackgroundColor
-              : Theme.of(context).backgroundColor,
+              : Theme.of(context).colorScheme.background,
           child: Icon(
             Icons.more_vert_outlined,
             size: 20,
@@ -221,10 +215,11 @@ class _DesktopHomePageState extends State<DesktopHomePage>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    translate("Password"),
+                  AutoSizeText(
+                    translate("One-time Password"),
                     style: TextStyle(
                         fontSize: 14, color: textColor?.withOpacity(0.5)),
+                    maxLines: 1,
                   ),
                   Row(
                     children: [
@@ -243,7 +238,8 @@ class _DesktopHomePageState extends State<DesktopHomePage>
                             readOnly: true,
                             decoration: InputDecoration(
                               border: InputBorder.none,
-                              contentPadding: EdgeInsets.only(bottom: 2),
+                              contentPadding:
+                                  EdgeInsets.only(top: 14, bottom: 10),
                             ),
                             style: TextStyle(fontSize: 15),
                           ),
@@ -255,9 +251,9 @@ class _DesktopHomePageState extends State<DesktopHomePage>
                             Icons.refresh,
                             color: refreshHover.value
                                 ? textColor
-                                : Color(0xFFDDDDDD), // TODO
+                                : Color(0xFFDDDDDD),
                             size: 22,
-                          ).marginOnly(right: 8, bottom: 2),
+                          ).marginOnly(right: 8, top: 4),
                         ),
                         onTap: () => bind.mainUpdateTemporaryPassword(),
                         onHover: (value) => refreshHover.value = value,
@@ -266,11 +262,10 @@ class _DesktopHomePageState extends State<DesktopHomePage>
                         child: Obx(
                           () => Icon(
                             Icons.edit,
-                            color: editHover.value
-                                ? textColor
-                                : Color(0xFFDDDDDD), // TODO
+                            color:
+                                editHover.value ? textColor : Color(0xFFDDDDDD),
                             size: 22,
-                          ).marginOnly(right: 8, bottom: 2),
+                          ).marginOnly(right: 8, top: 4),
                         ),
                         onTap: () => DesktopSettingPage.switch2page(1),
                         onHover: (value) => editHover.value = value,
@@ -315,16 +310,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
     );
   }
 
-  Widget buildHelpCards() {
-    if (Platform.isWindows) {
-      if (!bind.mainIsInstalled()) {
-        return buildInstallCard(
-            "", "install_tip", "Install", bind.mainGotoInstall);
-      } else if (bind.mainIsInstalledLowerVersion()) {
-        return buildInstallCard("Status", "Your installation is lower version.",
-            "Click to upgrade", bind.mainUpdateMe);
-      }
-    }
+  Future<Widget> buildHelpCards() async {
     if (updateUrl.isNotEmpty) {
       return buildInstallCard(
           "Status",
@@ -334,13 +320,71 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         await launchUrl(url);
       });
     }
-    if (Platform.isMacOS) {}
-    if (bind.mainIsInstalledLowerVersion()) {}
+    if (systemError.isNotEmpty) {
+      return buildInstallCard("", systemError, "", () {});
+    }
+    if (Platform.isWindows) {
+      if (!bind.mainIsInstalled()) {
+        return buildInstallCard(
+            "", "install_tip", "Install", bind.mainGotoInstall);
+      } else if (bind.mainIsInstalledLowerVersion()) {
+        return buildInstallCard("Status", "Your installation is lower version.",
+            "Click to upgrade", bind.mainUpdateMe);
+      }
+    } else if (Platform.isMacOS) {
+      if (!bind.mainIsCanScreenRecording(prompt: false)) {
+        return buildInstallCard("Permissions", "config_screen", "Configure",
+            () async {
+          bind.mainIsCanScreenRecording(prompt: true);
+          watchIsCanScreenRecording = true;
+        }, help: 'Help', link: translate("doc_mac_permission"));
+      } else if (!bind.mainIsProcessTrusted(prompt: false)) {
+        return buildInstallCard("Permissions", "config_acc", "Configure",
+            () async {
+          bind.mainIsProcessTrusted(prompt: true);
+          watchIsProcessTrust = true;
+        }, help: 'Help', link: translate("doc_mac_permission"));
+      } else if (!bind.mainIsCanInputMonitoring(prompt: false)) {
+        return buildInstallCard("Permissions", "config_input", "Configure",
+            () async {
+          bind.mainIsCanInputMonitoring(prompt: true);
+          watchIsInputMonitoring = true;
+        }, help: 'Help', link: translate("doc_mac_permission"));
+      } else if (!svcStopped.value &&
+          bind.mainIsInstalled() &&
+          !bind.mainIsInstalledDaemon(prompt: false)) {
+        return buildInstallCard("", "install_daemon_tip", "Install", () async {
+          bind.mainIsInstalledDaemon(prompt: true);
+        });
+      }
+      //// Disable microphone configuration for macOS. We will request the permission when needed.
+      // else if ((await osxCanRecordAudio() !=
+      //     PermissionAuthorizeType.authorized)) {
+      //   return buildInstallCard("Permissions", "config_microphone", "Configure",
+      //       () async {
+      //     osxRequestAudio();
+      //     watchIsCanRecordAudio = true;
+      //   });
+      // }
+    } else if (Platform.isLinux) {
+      if (bind.mainCurrentIsWayland()) {
+        return buildInstallCard(
+            "Warning", translate("wayland_experiment_tip"), "", () async {},
+            help: 'Help',
+            link: 'https://rustdesk.com/docs/en/manual/linux/#x11-required');
+      } else if (bind.mainIsLoginWayland()) {
+        return buildInstallCard("Warning",
+            "Login screen using Wayland is not supported", "", () async {},
+            help: 'Help',
+            link: 'https://rustdesk.com/docs/en/manual/linux/#login-screen');
+      }
+    }
     return Container();
   }
 
   Widget buildInstallCard(String title, String content, String btnText,
-      GestureTapCallback onPressed) {
+      GestureTapCallback onPressed,
+      {String? help, String? link}) {
     return Container(
       margin: EdgeInsets.only(top: 20),
       child: Container(
@@ -355,92 +399,133 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           )),
           padding: EdgeInsets.all(20),
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.start,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: (title.isNotEmpty
-                    ? <Widget>[
-                        Center(
-                            child: Text(
-                          translate(title),
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 15),
-                        ).marginOnly(bottom: 6)),
-                      ]
-                    : <Widget>[]) +
-                <Widget>[
-                  Text(
-                    translate(content),
-                    style: TextStyle(
-                        height: 1.5,
-                        color: Colors.white,
-                        fontWeight: FontWeight.normal,
-                        fontSize: 13),
-                  ).marginOnly(bottom: 20),
-                  Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                    FixedWidthButton(
-                      width: 150,
-                      padding: 8,
-                      isOutline: true,
-                      text: translate(btnText),
-                      textColor: Colors.white,
-                      borderColor: Colors.white,
-                      textSize: 20,
-                      radius: 10,
-                      onTap: onPressed,
-                    )
-                  ]),
-                ],
-          )),
+              mainAxisAlignment: MainAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: (title.isNotEmpty
+                      ? <Widget>[
+                          Center(
+                              child: Text(
+                            translate(title),
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 15),
+                          ).marginOnly(bottom: 6)),
+                        ]
+                      : <Widget>[]) +
+                  <Widget>[
+                    Text(
+                      translate(content),
+                      style: TextStyle(
+                          height: 1.5,
+                          color: Colors.white,
+                          fontWeight: FontWeight.normal,
+                          fontSize: 13),
+                    ).marginOnly(bottom: 20)
+                  ] +
+                  (btnText.isNotEmpty
+                      ? <Widget>[
+                          Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                FixedWidthButton(
+                                  width: 150,
+                                  padding: 8,
+                                  isOutline: true,
+                                  text: translate(btnText),
+                                  textColor: Colors.white,
+                                  borderColor: Colors.white,
+                                  textSize: 20,
+                                  radius: 10,
+                                  onTap: onPressed,
+                                )
+                              ])
+                        ]
+                      : <Widget>[]) +
+                  (help != null
+                      ? <Widget>[
+                          Center(
+                              child: InkWell(
+                                  onTap: () async =>
+                                      await launchUrl(Uri.parse(link!)),
+                                  child: Text(
+                                    translate(help),
+                                    style: TextStyle(
+                                        decoration: TextDecoration.underline,
+                                        color: Colors.white,
+                                        fontSize: 12),
+                                  )).marginOnly(top: 6)),
+                        ]
+                      : <Widget>[]))),
     );
-  }
-
-  @override
-  void onTrayIconMouseDown() {
-    windowManager.show();
-  }
-
-  @override
-  void onTrayIconRightMouseDown() {
-    // linux does not support popup menu manually.
-    // linux will handle popup action ifself.
-    if (Platform.isMacOS || Platform.isWindows) {
-      trayManager.popUpContextMenu();
-    }
-  }
-
-  @override
-  void onTrayMenuItemClick(MenuItem menuItem) {
-    switch (menuItem.key) {
-      case kTrayItemQuitKey:
-        windowManager.close();
-        break;
-      case kTrayItemShowKey:
-        windowManager.show();
-        windowManager.focus();
-        break;
-      default:
-        break;
-    }
   }
 
   @override
   void initState() {
     super.initState();
-    Timer(const Duration(seconds: 5), () async {
-      updateUrl = await bind.mainGetSoftwareUpdateUrl();
-      if (updateUrl.isNotEmpty) setState(() {});
+    _updateTimer = periodic_immediate(const Duration(seconds: 1), () async {
+      await gFFI.serverModel.fetchID();
+      final url = await bind.mainGetSoftwareUpdateUrl();
+      if (updateUrl != url) {
+        updateUrl = url;
+        setState(() {});
+      }
+      final error = await bind.mainGetError();
+      if (systemError != error) {
+        systemError = error;
+        setState(() {});
+      }
+      final v = await bind.mainGetOption(key: "stop-service") == "Y";
+      if (v != svcStopped.value) {
+        svcStopped.value = v;
+        setState(() {});
+      }
+      if (watchIsCanScreenRecording) {
+        if (bind.mainIsCanScreenRecording(prompt: false)) {
+          watchIsCanScreenRecording = false;
+          setState(() {});
+        }
+      }
+      if (watchIsProcessTrust) {
+        if (bind.mainIsProcessTrusted(prompt: false)) {
+          watchIsProcessTrust = false;
+          setState(() {});
+        }
+      }
+      if (watchIsInputMonitoring) {
+        if (bind.mainIsCanInputMonitoring(prompt: false)) {
+          watchIsInputMonitoring = false;
+          // Do not notify for now.
+          // Monitoring may not take effect until the process is restarted.
+          // rustDeskWinManager.call(
+          //     WindowType.RemoteDesktop, kWindowDisableGrabKeyboard, '');
+          setState(() {});
+        }
+      }
+      if (watchIsCanRecordAudio) {
+        if (Platform.isMacOS) {
+          Future.microtask(() async {
+            if ((await osxCanRecordAudio() ==
+                PermissionAuthorizeType.authorized)) {
+              watchIsCanRecordAudio = false;
+              setState(() {});
+            }
+          });
+        } else {
+          watchIsCanRecordAudio = false;
+          setState(() {});
+        }
+      }
     });
-    initTray();
-    trayManager.addListener(this);
-    windowManager.addListener(this);
+    Get.put<RxBool>(svcStopped, tag: 'stop-service');
+    rustDeskWinManager.registerActiveWindowListener(onActiveWindowChanged);
+
     rustDeskWinManager.setMethodHandler((call, fromWindowId) async {
       debugPrint(
-          "call ${call.method} with args ${call.arguments} from window $fromWindowId");
-      if (call.method == "main_window_on_top") {
+          "[Main] call ${call.method} with args ${call.arguments} from window $fromWindowId");
+      if (call.method == kWindowMainWindowOnTop) {
         window_on_top(null);
-      } else if (call.method == "get_window_info") {
+      } else if (call.method == kWindowGetWindowInfo) {
         final screen = (await window_size.getWindowInfo()).screen;
         if (screen == null) {
           return "";
@@ -463,157 +548,30 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         }
       } else if (call.method == kWindowActionRebuild) {
         reloadCurrentWindow();
+      } else if (call.method == kWindowEventShow) {
+        await rustDeskWinManager.registerActiveWindow(call.arguments["id"]);
+      } else if (call.method == kWindowEventHide) {
+        await rustDeskWinManager.unregisterActiveWindow(call.arguments["id"]);
+      } else if (call.method == kWindowConnect) {
+        await connectMainDesktop(
+          call.arguments['id'],
+          isFileTransfer: call.arguments['isFileTransfer'],
+          isTcpTunneling: call.arguments['isTcpTunneling'],
+          isRDP: call.arguments['isRDP'],
+          forceRelay: call.arguments['forceRelay'],
+        );
       }
-    });
-    Future.delayed(Duration.zero, () {
-      checkArguments();
     });
     _uniLinksSubscription = listenUniLinks();
   }
 
   @override
   void dispose() {
-    destoryTray();
-    trayManager.removeListener(this);
-    windowManager.removeListener(this);
     _uniLinksSubscription?.cancel();
+    Get.delete<RxBool>(tag: 'stop-service');
+    _updateTimer?.cancel();
     super.dispose();
   }
-}
-
-/// common login dialog for desktop
-/// call this directly
-Future<bool> loginDialog() async {
-  String userName = "";
-  var userNameMsg = "";
-  String pass = "";
-  var passMsg = "";
-  var userController = TextEditingController(text: userName);
-  var pwdController = TextEditingController(text: pass);
-
-  var isInProgress = false;
-  var completer = Completer<bool>();
-  gFFI.dialogManager.show((setState, close) {
-    submit() async {
-      setState(() {
-        userNameMsg = "";
-        passMsg = "";
-        isInProgress = true;
-      });
-      cancel() {
-        setState(() {
-          isInProgress = false;
-        });
-      }
-
-      userName = userController.text;
-      pass = pwdController.text;
-      if (userName.isEmpty) {
-        userNameMsg = translate("Username missed");
-        cancel();
-        return;
-      }
-      if (pass.isEmpty) {
-        passMsg = translate("Password missed");
-        cancel();
-        return;
-      }
-      try {
-        final resp = await gFFI.userModel.login(userName, pass);
-        if (resp.containsKey('error')) {
-          passMsg = resp['error'];
-          cancel();
-          return;
-        }
-        // {access_token: eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJndWlkIjoiMDFkZjQ2ZjgtZjg3OS00MDE0LTk5Y2QtMGMwYzM2MmViZGJlIiwiZXhwIjoxNjYxNDg2NzYwfQ.GZpe1oI8TfM5yTYNrpcwbI599P4Z_-b2GmnwNl2Lr-w,
-        // token_type: Bearer, user: {id: , name: admin, email: null, note: null, status: null, grp: null, is_admin: true}}
-        debugPrint("$resp");
-        completer.complete(true);
-      } catch (err) {
-        debugPrint(err.toString());
-        cancel();
-        return;
-      }
-      close();
-    }
-
-    cancel() {
-      completer.complete(false);
-      close();
-    }
-
-    return CustomAlertDialog(
-      title: Text(translate("Login")),
-      content: ConstrainedBox(
-        constraints: const BoxConstraints(minWidth: 500),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SizedBox(
-              height: 8.0,
-            ),
-            Row(
-              children: [
-                ConstrainedBox(
-                    constraints: const BoxConstraints(minWidth: 100),
-                    child: Text(
-                      "${translate('Username')}:",
-                      textAlign: TextAlign.start,
-                    ).marginOnly(bottom: 16.0)),
-                const SizedBox(
-                  width: 24.0,
-                ),
-                Expanded(
-                  child: TextField(
-                    decoration: InputDecoration(
-                        border: const OutlineInputBorder(),
-                        errorText: userNameMsg.isNotEmpty ? userNameMsg : null),
-                    controller: userController,
-                    focusNode: FocusNode()..requestFocus(),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(
-              height: 8.0,
-            ),
-            Row(
-              children: [
-                ConstrainedBox(
-                    constraints: const BoxConstraints(minWidth: 100),
-                    child: Text("${translate('Password')}:")
-                        .marginOnly(bottom: 16.0)),
-                const SizedBox(
-                  width: 24.0,
-                ),
-                Expanded(
-                  child: TextField(
-                    obscureText: true,
-                    decoration: InputDecoration(
-                        border: const OutlineInputBorder(),
-                        errorText: passMsg.isNotEmpty ? passMsg : null),
-                    controller: pwdController,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(
-              height: 4.0,
-            ),
-            Offstage(
-                offstage: !isInProgress, child: const LinearProgressIndicator())
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(onPressed: cancel, child: Text(translate("Cancel"))),
-        TextButton(onPressed: submit, child: Text(translate("OK"))),
-      ],
-      onSubmit: submit,
-      onCancel: cancel,
-    );
-  });
-  return completer.future;
 }
 
 void setPasswordDialog() async {
@@ -622,6 +580,14 @@ void setPasswordDialog() async {
   final p1 = TextEditingController(text: pw);
   var errMsg0 = "";
   var errMsg1 = "";
+  final RxString rxPass = pw.trim().obs;
+  final rules = [
+    DigitValidationRule(),
+    UppercaseValidationRule(),
+    LowercaseValidationRule(),
+    // SpecialCharacterValidationRule(),
+    MinCharactersValidationRule(8),
+  ];
 
   gFFI.dialogManager.show((setState, close) {
     submit() {
@@ -630,15 +596,20 @@ void setPasswordDialog() async {
         errMsg1 = "";
       });
       final pass = p0.text.trim();
-      if (pass.length < 6) {
-        setState(() {
-          errMsg0 = translate("Too short, at least 6 characters.");
-        });
-        return;
+      if (pass.isNotEmpty) {
+        final Iterable violations = rules.where((r) => !r.validate(pass));
+        if (violations.isNotEmpty) {
+          setState(() {
+            errMsg0 =
+                '${translate('Prompt')}: ${violations.map((r) => r.name).join(', ')}';
+          });
+          return;
+        }
       }
       if (p1.text.trim() != pass) {
         setState(() {
-          errMsg1 = translate("The confirmation is not identical.");
+          errMsg1 =
+              '${translate('Prompt')}: ${translate("The confirmation is not identical.")}';
         });
         return;
       }
@@ -658,23 +629,46 @@ void setPasswordDialog() async {
             ),
             Row(
               children: [
-                ConstrainedBox(
-                    constraints: const BoxConstraints(minWidth: 100),
-                    child: Text(
-                      "${translate('Password')}:",
-                      textAlign: TextAlign.start,
-                    ).marginOnly(bottom: 16.0)),
-                const SizedBox(
-                  width: 24.0,
-                ),
                 Expanded(
                   child: TextField(
                     obscureText: true,
                     decoration: InputDecoration(
-                        border: const OutlineInputBorder(),
+                        labelText: translate('Password'),
                         errorText: errMsg0.isNotEmpty ? errMsg0 : null),
                     controller: p0,
-                    focusNode: FocusNode()..requestFocus(),
+                    autofocus: true,
+                    onChanged: (value) {
+                      rxPass.value = value.trim();
+                      setState(() {
+                        errMsg0 = '';
+                      });
+                    },
+                  ),
+                ),
+              ],
+            ),
+            Row(
+              children: [
+                Expanded(child: PasswordStrengthIndicator(password: rxPass)),
+              ],
+            ).marginSymmetric(vertical: 8),
+            const SizedBox(
+              height: 8.0,
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    obscureText: true,
+                    decoration: InputDecoration(
+                        labelText: translate('Confirmation'),
+                        errorText: errMsg1.isNotEmpty ? errMsg1 : null),
+                    controller: p1,
+                    onChanged: (value) {
+                      setState(() {
+                        errMsg1 = '';
+                      });
+                    },
                   ),
                 ),
               ],
@@ -682,32 +676,30 @@ void setPasswordDialog() async {
             const SizedBox(
               height: 8.0,
             ),
-            Row(
-              children: [
-                ConstrainedBox(
-                    constraints: const BoxConstraints(minWidth: 100),
-                    child: Text("${translate('Confirmation')}:")
-                        .marginOnly(bottom: 16.0)),
-                const SizedBox(
-                  width: 24.0,
-                ),
-                Expanded(
-                  child: TextField(
-                    obscureText: true,
-                    decoration: InputDecoration(
-                        border: const OutlineInputBorder(),
-                        errorText: errMsg1.isNotEmpty ? errMsg1 : null),
-                    controller: p1,
-                  ),
-                ),
-              ],
-            ),
+            Obx(() => Wrap(
+                  runSpacing: 8,
+                  spacing: 4,
+                  children: rules.map((e) {
+                    var checked = e.validate(rxPass.value.trim());
+                    return Chip(
+                        label: Text(
+                          e.name,
+                          style: TextStyle(
+                              color: checked
+                                  ? const Color(0xFF0A9471)
+                                  : Color.fromARGB(255, 198, 86, 157)),
+                        ),
+                        backgroundColor: checked
+                            ? const Color(0xFFD0F7ED)
+                            : Color.fromARGB(255, 247, 205, 232));
+                  }).toList(),
+                ))
           ],
         ),
       ),
       actions: [
-        TextButton(onPressed: close, child: Text(translate("Cancel"))),
-        TextButton(onPressed: submit, child: Text(translate("OK"))),
+        dialogButton("Cancel", onPressed: close, isOutline: true),
+        dialogButton("OK", onPressed: submit),
       ],
       onSubmit: submit,
       onCancel: close,

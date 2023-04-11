@@ -8,7 +8,7 @@ pub struct Capturer {
     frame: Arc<Mutex<Option<quartz::Frame>>>,
     use_yuv: bool,
     i420: Vec<u8>,
-    saved_raw_data: Vec<u128>, // for faster compare and copy
+    saved_raw_data: Vec<u8>, // for faster compare and copy
 }
 
 impl Capturer {
@@ -83,7 +83,7 @@ impl crate::TraitCapturer for Capturer {
     }
 }
 
-pub struct Frame<'a>(quartz::Frame, PhantomData<&'a [u8]>);
+pub struct Frame<'a>(pub quartz::Frame, PhantomData<&'a [u8]>);
 
 impl<'a> ops::Deref for Frame<'a> {
     type Target = [u8];

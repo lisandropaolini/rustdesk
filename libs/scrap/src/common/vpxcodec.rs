@@ -4,10 +4,10 @@
 
 use hbb_common::anyhow::{anyhow, Context};
 use hbb_common::message_proto::{EncodedVideoFrame, EncodedVideoFrames, Message, VideoFrame};
-use hbb_common::{ResultType, get_time};
+use hbb_common::ResultType;
 
-use crate::codec::EncoderApi;
 use crate::STRIDE_ALIGN;
+use crate::{codec::EncoderApi, ImageFormat};
 
 use super::vpx::{vp8e_enc_control_id::*, vpx_codec_err_t::*, *};
 use hbb_common::bytes::Bytes;
@@ -30,6 +30,7 @@ pub struct VpxEncoder {
     ctx: vpx_codec_ctx_t,
     width: usize,
     height: usize,
+    id: VpxVideoCodecId,
 }
 
 pub struct VpxDecoder {
@@ -97,15 +98,10 @@ impl EncoderApi for VpxEncoder {
     {
         match cfg {
             crate::codec::EncoderCfg::VPX(config) => {
-                let i;
-                if cfg!(feature = "VP8") {
-                    i = match config.codec {
-                        VpxVideoCodecId::VP8 => call_vpx_ptr!(vpx_codec_vp8_cx()),
-                        VpxVideoCodecId::VP9 => call_vpx_ptr!(vpx_codec_vp9_cx()),
-                    };
-                } else {
-                    i = call_vpx_ptr!(vpx_codec_vp9_cx());
-                }
+                let i = match config.codec {
+                    VpxVideoCodecId::VP8 => call_vpx_ptr!(vpx_codec_vp8_cx()),
+                    VpxVideoCodecId::VP9 => call_vpx_ptr!(vpx_codec_vp9_cx()),
+                };
                 let mut c = unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
                 call_vpx!(vpx_codec_enc_config_default(i, &mut c, 0));
 
@@ -187,12 +183,17 @@ impl EncoderApi for VpxEncoder {
                         VP9E_SET_TILE_COLUMNS as _,
                         4 as c_int
                     ));
+                } else if config.codec == VpxVideoCodecId::VP8 {
+                    // https://github.com/webmproject/libvpx/blob/972149cafeb71d6f08df89e91a0130d6a38c4b15/vpx/vp8cx.h#L172
+                    // https://groups.google.com/a/webmproject.org/g/webm-discuss/c/DJhSrmfQ61M
+                    call_vpx!(vpx_codec_control_(&mut ctx, VP8E_SET_CPUUSED as _, 12,));
                 }
 
                 Ok(Self {
                     ctx,
                     width: config.width as _,
                     height: config.height as _,
+                    id: config.codec,
                 })
             }
             _ => Err(anyhow!("encoder type mismatch")),
@@ -213,7 +214,7 @@ impl EncoderApi for VpxEncoder {
 
         // to-do: flush periodically, e.g. 1 second
         if frames.len() > 0 {
-            Ok(VpxEncoder::create_msg(frames))
+            Ok(VpxEncoder::create_msg(self.id, frames))
         } else {
             Err(anyhow!("no valid frame"))
         }
@@ -233,7 +234,9 @@ impl EncoderApi for VpxEncoder {
 
 impl VpxEncoder {
     pub fn encode(&mut self, pts: i64, data: &[u8], stride_align: usize) -> Result<EncodeFrames> {
-        assert!(2 * data.len() >= 3 * self.width * self.height);
+        if 2 * data.len() < 3 * self.width * self.height {
+            return Err(Error::FailedCall("len not enough".to_string()));
+        }
 
         let mut image = Default::default();
         call_vpx_ptr!(vpx_img_wrap(
@@ -278,14 +281,17 @@ impl VpxEncoder {
     }
 
     #[inline]
-    fn create_msg(vp9s: Vec<EncodedVideoFrame>) -> Message {
+    pub fn create_msg(codec_id: VpxVideoCodecId, frames: Vec<EncodedVideoFrame>) -> Message {
         let mut msg_out = Message::new();
         let mut vf = VideoFrame::new();
-        vf.set_vp9s(EncodedVideoFrames {
-            frames: vp9s.into(),
+        let vpxs = EncodedVideoFrames {
+            frames: frames.into(),
             ..Default::default()
-        });
-        vf.timestamp = get_time();
+        };
+        match codec_id {
+            VpxVideoCodecId::VP8 => vf.set_vp8s(vpxs),
+            VpxVideoCodecId::VP9 => vf.set_vp9s(vpxs),
+        }
         msg_out.set_video_frame(vf);
         msg_out
     }
@@ -381,15 +387,10 @@ impl VpxDecoder {
     pub fn new(config: VpxDecoderConfig) -> Result<Self> {
         // This is sound because `vpx_codec_ctx` is a repr(C) struct without any field that can
         // cause UB if uninitialized.
-        let i;
-        if cfg!(feature = "VP8") {
-            i = match config.codec {
-                VpxVideoCodecId::VP8 => call_vpx_ptr!(vpx_codec_vp8_dx()),
-                VpxVideoCodecId::VP9 => call_vpx_ptr!(vpx_codec_vp9_dx()),
-            };
-        } else {
-            i = call_vpx_ptr!(vpx_codec_vp9_dx());
-        }
+        let i = match config.codec {
+            VpxVideoCodecId::VP8 => call_vpx_ptr!(vpx_codec_vp8_dx()),
+            VpxVideoCodecId::VP9 => call_vpx_ptr!(vpx_codec_vp9_dx()),
+        };
         let mut ctx = Default::default();
         let cfg = vpx_codec_dec_cfg_t {
             threads: if config.num_threads == 0 {
@@ -415,7 +416,7 @@ impl VpxDecoder {
         Ok(Self { ctx })
     }
 
-    pub fn decode2rgb(&mut self, data: &[u8], rgba: bool) -> Result<Vec<u8>> {
+    pub fn decode2rgb(&mut self, data: &[u8], fmt: ImageFormat) -> Result<Vec<u8>> {
         let mut img = Image::new();
         for frame in self.decode(data)? {
             drop(img);
@@ -429,7 +430,7 @@ impl VpxDecoder {
             Ok(Vec::new())
         } else {
             let mut out = Default::default();
-            img.rgb(1, rgba, &mut out);
+            img.to(fmt, 1, &mut out);
             Ok(out)
         }
     }
@@ -537,40 +538,62 @@ impl Image {
         self.inner().stride[iplane]
     }
 
-    pub fn rgb(&self, stride_align: usize, rgba: bool, dst: &mut Vec<u8>) {
+    pub fn to(&self, fmt: ImageFormat, stride: usize, dst: &mut Vec<u8>) {
         let h = self.height();
-        let mut w = self.width();
-        let bps = if rgba { 4 } else { 3 };
-        w = (w + stride_align - 1) & !(stride_align - 1);
-        dst.resize(h * w * bps, 0);
+        let w = self.width();
+        let bytes_per_pixel = match fmt {
+            ImageFormat::Raw => 3,
+            ImageFormat::ARGB | ImageFormat::ABGR => 4,
+        };
+        // https://github.com/lemenkov/libyuv/blob/6900494d90ae095d44405cd4cc3f346971fa69c9/source/convert_argb.cc#L128
+        // https://github.com/lemenkov/libyuv/blob/6900494d90ae095d44405cd4cc3f346971fa69c9/source/convert_argb.cc#L129
+        let bytes_per_row = (w * bytes_per_pixel + stride - 1) & !(stride - 1);
+        dst.resize(h * bytes_per_row, 0);
         let img = self.inner();
         unsafe {
-            if rgba {
-                super::I420ToARGB(
-                    img.planes[0],
-                    img.stride[0],
-                    img.planes[1],
-                    img.stride[1],
-                    img.planes[2],
-                    img.stride[2],
-                    dst.as_mut_ptr(),
-                    (w * bps) as _,
-                    self.width() as _,
-                    self.height() as _,
-                );
-            } else {
-                super::I420ToRAW(
-                    img.planes[0],
-                    img.stride[0],
-                    img.planes[1],
-                    img.stride[1],
-                    img.planes[2],
-                    img.stride[2],
-                    dst.as_mut_ptr(),
-                    (w * bps) as _,
-                    self.width() as _,
-                    self.height() as _,
-                );
+            match fmt {
+                ImageFormat::Raw => {
+                    super::I420ToRAW(
+                        img.planes[0],
+                        img.stride[0],
+                        img.planes[1],
+                        img.stride[1],
+                        img.planes[2],
+                        img.stride[2],
+                        dst.as_mut_ptr(),
+                        bytes_per_row as _,
+                        self.width() as _,
+                        self.height() as _,
+                    );
+                }
+                ImageFormat::ARGB => {
+                    super::I420ToARGB(
+                        img.planes[0],
+                        img.stride[0],
+                        img.planes[1],
+                        img.stride[1],
+                        img.planes[2],
+                        img.stride[2],
+                        dst.as_mut_ptr(),
+                        bytes_per_row as _,
+                        self.width() as _,
+                        self.height() as _,
+                    );
+                }
+                ImageFormat::ABGR => {
+                    super::I420ToABGR(
+                        img.planes[0],
+                        img.stride[0],
+                        img.planes[1],
+                        img.stride[1],
+                        img.planes[2],
+                        img.stride[2],
+                        dst.as_mut_ptr(),
+                        bytes_per_row as _,
+                        self.width() as _,
+                        self.height() as _,
+                    );
+                }
             }
         }
     }

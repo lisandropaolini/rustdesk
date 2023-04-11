@@ -5,7 +5,7 @@
   <a href="#comment-construire-avec-docker">Docker</a> -
   <a href="#structure-du-projet">Structure</a> -
   <a href="#images">Images</a><br>
-  [<a href="../README.md">English</a>] | [<a href="README-UA.md">Українська</a>] | [<a href="README-CS.md">česky</a>] | [<a href="README-ZH.md">中文</a>] | [<a href="README-HU.md">Magyar</a>] | [<a href="README-ES.md">Español</a>] | [<a href="README-FA.md">فارسی</a>] | [<a href="README-DE.md">Deutsch</a>] | [<a href="README-PL.md">Polski</a>] | [<a href="README-ID.md">Indonesian</a>] | [<a href="README-FI.md">Suomi</a>] | [<a href="README-ML.md">മലയാളം</a>] | [<a href="README-JP.md">日本語</a>] | [<a href="README-NL.md">Nederlands</a>] | [<a href="README-IT.md">Italiano</a>] | [<a href="README-RU.md">Русский</a>] | [<a href="README-PTBR.md">Português (Brasil)</a>] | [<a href="README-EO.md">Esperanto</a>] | [<a href="README-KR.md">한국어</a>] | [<a href="README-AR.md">العربي</a>] | [<a href="README-VN.md">Tiếng Việt</a>]<br>
+  [<a href="../README.md">English</a>] | [<a href="README-UA.md">Українська</a>] | [<a href="README-CS.md">česky</a>] | [<a href="README-ZH.md">中文</a>] | [<a href="README-HU.md">Magyar</a>] | [<a href="README-ES.md">Español</a>] | [<a href="README-FA.md">فارسی</a>] | [<a href="README-DE.md">Deutsch</a>] | [<a href="README-PL.md">Polski</a>] | [<a href="README-ID.md">Indonesian</a>] | [<a href="README-FI.md">Suomi</a>] | [<a href="README-ML.md">മലയാളം</a>] | [<a href="README-JP.md">日本語</a>] | [<a href="README-NL.md">Nederlands</a>] | [<a href="README-IT.md">Italiano</a>] | [<a href="README-RU.md">Русский</a>] | [<a href="README-PTBR.md">Português (Brasil)</a>] | [<a href="README-EO.md">Esperanto</a>] | [<a href="README-KR.md">한국어</a>] | [<a href="README-AR.md">العربي</a>] | [<a href="README-VN.md">Tiếng Việt</a>] | [<a href="README-GR.md">Ελληνικά</a>]<br>
   <b>Nous avons besoin de votre aide pour traduire ce README dans votre langue maternelle</b>.
 </p>
 
@@ -23,11 +23,13 @@ RustDesk accueille les contributions de tout le monde. Voir [`docs/CONTRIBUTING.
 
 Ci-dessous se trouvent les serveurs que vous utilisez gratuitement, cela peut changer au fil du temps. Si vous n'êtes pas proche de l'un d'entre eux, votre réseau peut être lent.
 
-- Séoul, AWS lightsail, 1 VCPU/0.5G RAM
-- Singapour, Vultr, 1 VCPU/1G RAM
-- Dallas, Vultr, 1 VCPU/1G RAM
-- Germany, Codext, 2 VCPU / 4GB RAM 
-- Germany, Hetzner, 4 VCPU / 8GB RAM
+| Location | Vendor | Specification |
+| --------- | ------------- | ------------------ |
+| Seoul | AWS lightsail | 1 vCPU / 0.5GB RAM |
+| Germany | Hetzner | 2 vCPU / 4GB RAM |
+| Germany | Codext | 4 vCPU / 8GB RAM |
+| Finland (Helsinki) | 0x101 Cyber Security | 4 vCPU / 8GB RAM |
+| USA (Ashburn) | 0x101 Cyber Security | 4 vCPU / 8GB RAM |
 
 ## Dépendances
 

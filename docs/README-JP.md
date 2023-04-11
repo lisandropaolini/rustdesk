@@ -5,7 +5,7 @@
   <a href="#how-to-build-with-docker">Docker</a> •
   <a href="#file-structure">Structure</a> •
   <a href="#snapshot">Snapshot</a><br>
-  [<a href="../README.md">English</a>] | [<a href="README-UA.md">Українська</a>] | [<a href="README-CS.md">česky</a>] | [<a href="README-ZH.md">中文</a>] | [<a href="README-HU.md">Magyar</a>] | [<a href="README-ES.md">Español</a>] | [<a href="README-FA.md">فارسی</a>] | [<a href="README-FR.md">Français</a>] | [<a href="README-DE.md">Deutsch</a>] | [<a href="README-PL.md">Polski</a>] | [<a href="README-ID.md">Indonesian</a>] | [<a href="README-FI.md">Suomi</a>] | [<a href="README-ML.md">മലയാളം</a>] | [<a href="README-NL.md">Nederlands</a>] | [<a href="README-IT.md">Italiano</a>] | [<a href="README-RU.md">Русский</a>] | [<a href="README-PTBR.md">Português (Brasil)</a>] | [<a href="README-EO.md">Esperanto</a>] | [<a href="README-KR.md">한국어</a>] | [<a href="README-AR.md">العربي</a>] | [<a href="README-VN.md">Tiếng Việt</a>]<br>
+  [<a href="../README.md">English</a>] | [<a href="README-UA.md">Українська</a>] | [<a href="README-CS.md">česky</a>] | [<a href="README-ZH.md">中文</a>] | [<a href="README-HU.md">Magyar</a>] | [<a href="README-ES.md">Español</a>] | [<a href="README-FA.md">فارسی</a>] | [<a href="README-FR.md">Français</a>] | [<a href="README-DE.md">Deutsch</a>] | [<a href="README-PL.md">Polski</a>] | [<a href="README-ID.md">Indonesian</a>] | [<a href="README-FI.md">Suomi</a>] | [<a href="README-ML.md">മലയാളം</a>] | [<a href="README-NL.md">Nederlands</a>] | [<a href="README-IT.md">Italiano</a>] | [<a href="README-RU.md">Русский</a>] | [<a href="README-PTBR.md">Português (Brasil)</a>] | [<a href="README-EO.md">Esperanto</a>] | [<a href="README-KR.md">한국어</a>] | [<a href="README-AR.md">العربي</a>] | [<a href="README-VN.md">Tiếng Việt</a>] | [<a href="README-GR.md">Ελληνικά</a>]<br>
   <b>このREADMEをあなたの母国語に翻訳するために、あなたの助けが必要です。</b>
 </p>
 
@@ -14,7 +14,7 @@ Chat with us: [Discord](https://discord.gg/nDceKgxnkV) | [Twitter](https://twitt
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/I2I04VU09)
 
-Rustで書かれた、設定不要ですぐに使えるリモートデスクトップソフトウェアです。自分のデータを完全にコントロールでき、セキュリティの心配もありません。私たちのランデブー/リレーサーバを使うことも、[自分で設定する](https://rustdesk.com/server) ことも、 [自分でランデブー/リレーサーバを書くこともできます。](https://github.com/rustdesk/rustdesk-server-demo).
+Rustで書かれた、設定不要ですぐに使えるリモートデスクトップソフトウェアです。自分のデータを完全にコントロールでき、セキュリティの心配もありません。私たちのランデブー/リレーサーバを使うことも、[自分で設定する](https://rustdesk.com/server) ことも、 [自分でランデブー/リレーサーバを書くこともできます](https://github.com/rustdesk/rustdesk-server-demo)。
 
 ![image](https://user-images.githubusercontent.com/71636191/171661982-430285f0-2e12-4b1d-9957-4a58e375304d.png)
 
@@ -29,11 +29,11 @@ RustDeskは誰からの貢献も歓迎します。 貢献するには [`docs/CON
 下記のサーバーは、無料で使用できますが、後々変更されることがあります。これらのサーバーから遠い場合、接続が遅い可能性があります。
 | Location | Vendor | Specification |
 | --------- | ------------- | ------------------ |
-| Seoul | AWS lightsail | 1 VCPU / 0.5GB RAM |
-| Singapore | Vultr | 1 VCPU / 1GB RAM |
-| Dallas | Vultr | 1 VCPU / 1GB RAM |
-| Germany | Hetzner | 2 VCPU / 4GB RAM |
-| Germany | Codext | 4 VCPU / 8GB RAM |
+| Seoul | AWS lightsail | 1 vCPU / 0.5GB RAM |
+| Germany | Hetzner | 2 vCPU / 4GB RAM |
+| Germany | Codext | 4 vCPU / 8GB RAM |
+| Finland (Helsinki) | 0x101 Cyber Security | 4 vCPU / 8GB RAM |
+| USA (Ashburn) | 0x101 Cyber Security | 4 vCPU / 8GB RAM |
 
 ## 依存関係
 
@@ -58,7 +58,7 @@ RustDeskは誰からの貢献も歓迎します。 貢献するには [`docs/CON
 
 
 
-## [Build](https://rustdesk.com/docs/en/dev/build/)
+## [ビルド](https://rustdesk.com/docs/en/dev/build/)
 
 ## Linuxでのビルド手順
 
@@ -105,7 +105,7 @@ cp libvpx.a $HOME/vcpkg/installed/x64-linux/lib/
 cd
 ```
 
-### Build
+### ビルド
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -154,7 +154,7 @@ target/release/rustdesk
 
 これらのコマンドをRustDeskリポジトリのルートから実行していることを確認してください。そうしないと、アプリケーションが必要なリソースを見つけられない可能性があります。また、 `install` や `run` などの他の cargo サブコマンドは、ホストではなくコンテナ内にプログラムをインストールまたは実行するため、現在この方法ではサポートされていないことに注意してください。
 
-## File Structure
+## ファイル構造
 
 - **[libs/hbb_common](https://github.com/rustdesk/rustdesk/tree/master/libs/hbb_common)**: ビデオコーデック、コンフィグ、tcp/udpラッパー、protobuf、ファイル転送用のfs関数、その他のユーティリティ関数
 - **[libs/scrap](https://github.com/rustdesk/rustdesk/tree/master/libs/scrap)**: スクリーンキャプチャ
@@ -165,7 +165,7 @@ target/release/rustdesk
 - **[src/rendezvous_mediator.rs](https://github.com/rustdesk/rustdesk/tree/master/src/rendezvous_mediator.rs)**: [rustdesk-server](https://github.com/rustdesk/rustdesk-server), と通信し、リモートダイレクト (TCP hole punching) または中継接続を待つ。
 - **[src/platform](https://github.com/rustdesk/rustdesk/tree/master/src/platform)**: プラットフォーム固有のコード
 
-## Snapshot
+## スナップショット
 
 ![image](https://user-images.githubusercontent.com/71636191/113112362-ae4deb80-923b-11eb-957d-ff88daad4f06.png)
 

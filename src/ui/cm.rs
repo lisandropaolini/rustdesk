@@ -51,6 +51,21 @@ impl InvokeUiCM for SciterHandler {
     fn change_language(&self) {
         // TODO
     }
+
+    fn show_elevation(&self, show: bool) {
+        self.call("showElevation", &make_args!(show));
+    }
+
+    fn update_voice_call_state(&self, client: &crate::ui_cm_interface::Client) {
+        self.call(
+            "updateVoiceCallState",
+            &make_args!(
+                client.id,
+                client.in_voice_call,
+                client.incoming_voice_call
+            ),
+        );
+    }
 }
 
 impl SciterHandler {
@@ -85,7 +100,7 @@ impl SciterConnectionManager {
     }
 
     fn get_icon(&mut self) -> String {
-        crate::get_icon()
+        super::get_icon()
     }
 
     fn check_click_time(&mut self, id: i32) {
@@ -123,6 +138,18 @@ impl SciterConnectionManager {
     fn t(&self, name: String) -> String {
         crate::client::translate(name)
     }
+
+    fn can_elevate(&self) -> bool {
+        crate::ui_cm_interface::can_elevate()
+    }
+
+    fn elevate_portable(&self, id: i32) {
+        crate::ui_cm_interface::elevate_portable(id);
+    }
+
+    fn get_option(&self, key: String) -> String {
+        crate::ui_interface::get_option(key)
+    }
 }
 
 impl sciter::EventHandler for SciterConnectionManager {
@@ -141,5 +168,8 @@ impl sciter::EventHandler for SciterConnectionManager {
         fn authorize(i32);
         fn switch_permission(i32, String, bool);
         fn send_msg(i32, String);
+        fn can_elevate();
+        fn elevate_portable(i32);
+        fn get_option(String);
     }
 }

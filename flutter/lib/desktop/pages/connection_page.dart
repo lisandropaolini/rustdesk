@@ -4,10 +4,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:auto_size_text/auto_size_text.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_hbb/common/widgets/address_book.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/scroll_wrapper.dart';
+import 'package:flutter_hbb/models/state_model.dart';
 import 'package:get/get.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:window_manager/window_manager.dart';
@@ -15,9 +16,10 @@ import 'package:window_manager/window_manager.dart';
 import '../../common.dart';
 import '../../common/formatter/id_formatter.dart';
 import '../../common/widgets/peer_tab_page.dart';
-import '../../common/widgets/peers_view.dart';
 import '../../models/platform_model.dart';
 import '../widgets/button.dart';
+
+import 'package:flutter_hbb/common/widgets/dialog.dart';
 
 /// Connection page for connecting to a remote peer.
 class ConnectionPage extends StatefulWidget {
@@ -41,11 +43,11 @@ class _ConnectionPageState extends State<ConnectionPage>
   final RxBool _idInputFocused = false.obs;
   final FocusNode _idFocusNode = FocusNode();
 
-  var svcStopped = false.obs;
+  var svcStopped = Get.find<RxBool>(tag: 'stop-service');
   var svcStatusCode = 0.obs;
   var svcIsUsingPublicServer = true.obs;
 
-  bool isWindowMinisized = false;
+  bool isWindowMinimized = false;
 
   @override
   void initState() {
@@ -60,13 +62,15 @@ class _ConnectionPageState extends State<ConnectionPage>
         }
       }();
     }
-    _updateTimer = Timer.periodic(Duration(seconds: 1), (timer) {
+    _updateTimer = periodic_immediate(Duration(seconds: 1), () async {
       updateStatus();
     });
     _idFocusNode.addListener(() {
       _idInputFocused.value = _idFocusNode.hasFocus;
+      // select all to faciliate removing text, just following the behavior of address input of chrome
+      _idController.selection = TextSelection(
+          baseOffset: 0, extentOffset: _idController.value.text.length);
     });
-    Get.put<RxBool>(svcStopped, tag: 'service-stop');
     windowManager.addListener(this);
   }
 
@@ -74,7 +78,6 @@ class _ConnectionPageState extends State<ConnectionPage>
   void dispose() {
     _idController.dispose();
     _updateTimer?.cancel();
-    Get.delete<RxBool>(tag: 'service-stop');
     windowManager.removeListener(this);
     super.dispose();
   }
@@ -83,14 +86,32 @@ class _ConnectionPageState extends State<ConnectionPage>
   void onWindowEvent(String eventName) {
     super.onWindowEvent(eventName);
     if (eventName == 'minimize') {
-      isWindowMinisized = true;
+      isWindowMinimized = true;
     } else if (eventName == 'maximize' || eventName == 'restore') {
-      if (isWindowMinisized && Platform.isWindows) {
-        // windows can't update when minisized.
+      if (isWindowMinimized && Platform.isWindows) {
+        // windows can't update when minimized.
         Get.forceAppUpdate();
       }
-      isWindowMinisized = false;
+      isWindowMinimized = false;
     }
+  }
+
+  @override
+  void onWindowEnterFullScreen() {
+    // Remove edge border by setting the value to zero.
+    stateGlobal.resizeEdgeSize.value = 0;
+  }
+
+  @override
+  void onWindowLeaveFullScreen() {
+    // Restore edge border to default edge size.
+    stateGlobal.resizeEdgeSize.value = kWindowEdgeSize;
+  }
+
+  @override
+  void onWindowClose() {
+    super.onWindowClose();
+    bind.mainOnMainWindowClose();
   }
 
   @override
@@ -102,13 +123,13 @@ class _ConnectionPageState extends State<ConnectionPage>
             scrollController: _scrollController,
             child: CustomScrollView(
               controller: _scrollController,
-              physics: NeverScrollableScrollPhysics(),
+              physics: DraggableNeverScrollableScrollPhysics(),
               slivers: [
                 SliverList(
                     delegate: SliverChildListDelegate([
                   Row(
                     children: [
-                      _buildRemoteIDTextField(context),
+                      Flexible(child: _buildRemoteIDTextField(context)),
                     ],
                   ).marginOnly(top: 22),
                   SizedBox(height: 12),
@@ -116,28 +137,7 @@ class _ConnectionPageState extends State<ConnectionPage>
                 ])),
                 SliverFillRemaining(
                   hasScrollBody: false,
-                  child: PeerTabPage(
-                    tabs: [
-                      translate('Recent Sessions'),
-                      translate('Favorites'),
-                      translate('Discovered'),
-                      translate('Address Book')
-                    ],
-                    children: [
-                      RecentPeersView(
-                        menuPadding: kDesktopMenuPadding,
-                      ),
-                      FavoritePeersView(
-                        menuPadding: kDesktopMenuPadding,
-                      ),
-                      DiscoveredPeersView(
-                        menuPadding: kDesktopMenuPadding,
-                      ),
-                      const AddressBook(
-                        menuPadding: kDesktopMenuPadding,
-                      ),
-                    ],
-                  ).paddingOnly(right: 12.0),
+                  child: PeerTabPage().paddingOnly(right: 12.0),
                 )
               ],
             ).paddingOnly(left: 12.0),
@@ -152,7 +152,7 @@ class _ConnectionPageState extends State<ConnectionPage>
   /// Callback for the connect button.
   /// Connects to the selected peer.
   void onConnect({bool isFileTransfer = false}) {
-    final id = _idController.id;
+    var id = _idController.id;
     connect(context, id, isFileTransfer: isFileTransfer);
   }
 
@@ -163,20 +163,22 @@ class _ConnectionPageState extends State<ConnectionPage>
       width: 320 + 20 * 2,
       padding: const EdgeInsets.fromLTRB(20, 24, 20, 22),
       decoration: BoxDecoration(
-        color: Theme.of(context).backgroundColor,
-        borderRadius: const BorderRadius.all(Radius.circular(13)),
-      ),
+          borderRadius: const BorderRadius.all(Radius.circular(13)),
+          border: Border.all(color: Theme.of(context).colorScheme.background)),
       child: Ink(
         child: Column(
           children: [
             Row(
               children: [
-                Text(
-                  translate('Control Remote Desktop'),
-                  style: Theme.of(context)
-                      .textTheme
-                      .titleLarge
-                      ?.merge(TextStyle(height: 1)),
+                Expanded(
+                  child: AutoSizeText(
+                    translate('Control Remote Desktop'),
+                    maxLines: 1,
+                    style: Theme.of(context)
+                        .textTheme
+                        .titleLarge
+                        ?.merge(TextStyle(height: 1)),
+                  ),
                 ),
               ],
             ).marginOnly(bottom: 15),
@@ -185,6 +187,7 @@ class _ConnectionPageState extends State<ConnectionPage>
                 Expanded(
                   child: Obx(
                     () => TextField(
+                      maxLength: 90,
                       autocorrect: false,
                       enableSuggestions: false,
                       keyboardType: TextInputType.visiblePassword,
@@ -192,31 +195,19 @@ class _ConnectionPageState extends State<ConnectionPage>
                       style: const TextStyle(
                         fontFamily: 'WorkSans',
                         fontSize: 22,
-                        height: 1,
+                        height: 1.4,
                       ),
                       maxLines: 1,
                       cursorColor:
                           Theme.of(context).textTheme.titleLarge?.color,
                       decoration: InputDecoration(
+                          filled: false,
+                          counterText: '',
                           hintText: _idInputFocused.value
                               ? null
                               : translate('Enter Remote ID'),
-                          border: OutlineInputBorder(
-                              borderRadius: BorderRadius.zero,
-                              borderSide: BorderSide(
-                                  color: MyTheme.color(context).border!)),
-                          enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.zero,
-                              borderSide: BorderSide(
-                                  color: MyTheme.color(context).border!)),
-                          focusedBorder: const OutlineInputBorder(
-                            borderRadius: BorderRadius.zero,
-                            borderSide:
-                                BorderSide(color: MyTheme.button, width: 3),
-                          ),
-                          isDense: true,
                           contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 12)),
+                              horizontal: 15, vertical: 13)),
                       controller: _idController,
                       inputFormatters: [IDTextInputFormatter()],
                       onSubmitted: (s) {
@@ -234,9 +225,7 @@ class _ConnectionPageState extends State<ConnectionPage>
                 children: [
                   Button(
                     isOutline: true,
-                    onTap: () {
-                      onConnect(isFileTransfer: true);
-                    },
+                    onTap: () => onConnect(isFileTransfer: true),
                     text: "Transfer File",
                   ),
                   const SizedBox(
@@ -250,9 +239,8 @@ class _ConnectionPageState extends State<ConnectionPage>
         ),
       ),
     );
-    return Center(
-        child: Container(
-            constraints: const BoxConstraints(maxWidth: 600), child: w));
+    return Container(
+        constraints: const BoxConstraints(maxWidth: 600), child: w);
   }
 
   Widget buildStatus() {
@@ -286,9 +274,9 @@ class _ConnectionPageState extends State<ConnectionPage>
               // stop
               Offstage(
                 offstage: !svcStopped.value,
-                child: GestureDetector(
+                child: InkWell(
                         onTap: () async {
-                          bool checked =
+                          bool checked = !bind.mainIsInstalled() ||
                               await bind.mainCheckSuperUserPermission();
                           if (checked) {
                             bind.mainSetOption(key: "stop-service", value: "");
@@ -347,7 +335,6 @@ class _ConnectionPageState extends State<ConnectionPage>
   }
 
   updateStatus() async {
-    svcStopped.value = await bind.mainGetOption(key: "stop-service") == "Y";
     final status =
         jsonDecode(await bind.mainGetConnectStatus()) as Map<String, dynamic>;
     svcStatusCode.value = status["status_num"];

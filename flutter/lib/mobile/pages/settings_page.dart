@@ -9,6 +9,8 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../common.dart';
 import '../../common/widgets/dialog.dart';
+import '../../common/widgets/login.dart';
+import '../../consts.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../widgets/dialog.dart';
@@ -30,18 +32,20 @@ class SettingsPage extends StatefulWidget implements PageShape {
 }
 
 const url = 'https://rustdesk.com/';
-final _hasIgnoreBattery = androidVersion >= 26;
-var _ignoreBatteryOpt = false;
-var _enableAbr = false;
-var _denyLANDiscovery = false;
-var _onlyWhiteList = false;
-var _enableDirectIPAccess = false;
-var _enableRecordSession = false;
-var _autoRecordIncomingSession = false;
-var _localIP = "";
-var _directAccessPort = "";
 
 class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
+  final _hasIgnoreBattery = androidVersion >= 26;
+  var _ignoreBatteryOpt = false;
+  var _enableStartOnBoot = false;
+  var _enableAbr = false;
+  var _denyLANDiscovery = false;
+  var _onlyWhiteList = false;
+  var _enableDirectIPAccess = false;
+  var _enableRecordSession = false;
+  var _autoRecordIncomingSession = false;
+  var _localIP = "";
+  var _directAccessPort = "";
+
   @override
   void initState() {
     super.initState();
@@ -49,11 +53,34 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
 
     () async {
       var update = false;
+
       if (_hasIgnoreBattery) {
-        update = await updateIgnoreBatteryStatus();
+        if (await checkAndUpdateIgnoreBatteryStatus()) {
+          update = true;
+        }
       }
 
-      final enableAbrRes = await bind.mainGetOption(key: "enable-abr") != "N";
+      if (await checkAndUpdateStartOnBoot()) {
+        update = true;
+      }
+
+      // start on boot depends on ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS and SYSTEM_ALERT_WINDOW
+      var enableStartOnBoot =
+          await gFFI.invokeMethod(AndroidChannel.kGetStartOnBootOpt);
+      if (enableStartOnBoot) {
+        if (!await canStartOnBoot()) {
+          enableStartOnBoot = false;
+          gFFI.invokeMethod(AndroidChannel.kSetStartOnBootOpt, false);
+        }
+      }
+
+      if (enableStartOnBoot != _enableStartOnBoot) {
+        update = true;
+        _enableStartOnBoot = enableStartOnBoot;
+      }
+
+      final enableAbrRes = option2bool(
+          "enable-abr", await bind.mainGetOption(key: "enable-abr"));
       if (enableAbrRes != _enableAbr) {
         update = true;
         _enableAbr = enableAbrRes;
@@ -124,17 +151,32 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       () async {
-        if (await updateIgnoreBatteryStatus()) {
+        final ibs = await checkAndUpdateIgnoreBatteryStatus();
+        final sob = await checkAndUpdateStartOnBoot();
+        if (ibs || sob) {
           setState(() {});
         }
       }();
     }
   }
 
-  Future<bool> updateIgnoreBatteryStatus() async {
-    final res = await PermissionManager.check("ignore_battery_optimizations");
+  Future<bool> checkAndUpdateIgnoreBatteryStatus() async {
+    final res = await AndroidPermissionManager.check(
+        kRequestIgnoreBatteryOptimizations);
     if (_ignoreBatteryOpt != res) {
       _ignoreBatteryOpt = res;
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  Future<bool> checkAndUpdateStartOnBoot() async {
+    if (!await canStartOnBoot() && _enableStartOnBoot) {
+      _enableStartOnBoot = false;
+      debugPrint(
+          "checkAndUpdateStartOnBoot and set _enableStartOnBoot -> false");
+      gFFI.invokeMethod(AndroidChannel.kSetStartOnBootOpt, false);
       return true;
     } else {
       return false;
@@ -264,7 +306,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                   ]),
               onToggle: (v) async {
                 if (v) {
-                  PermissionManager.request("ignore_battery_optimizations");
+                  await AndroidPermissionManager.request(
+                      kRequestIgnoreBatteryOptimizations);
                 } else {
                   final res = await gFFI.dialogManager
                       .show<bool>((setState, close) => CustomAlertDialog(
@@ -272,35 +315,67 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                             content: Text(translate(
                                 "android_open_battery_optimizations_tip")),
                             actions: [
-                              TextButton(
-                                  onPressed: () => close(),
-                                  child: Text(translate("Cancel"))),
-                              ElevatedButton(
-                                  onPressed: () => close(true),
-                                  child:
-                                      Text(translate("Open System Setting"))),
+                              dialogButton("Cancel",
+                                  onPressed: () => close(), isOutline: true),
+                              dialogButton(
+                                "Open System Setting",
+                                onPressed: () => close(true),
+                              ),
                             ],
                           ));
                   if (res == true) {
-                    PermissionManager.request("application_details_settings");
+                    AndroidPermissionManager.startAction(
+                        kActionApplicationDetailsSettings);
                   }
                 }
               }));
     }
+    enhancementsTiles.add(SettingsTile.switchTile(
+        initialValue: _enableStartOnBoot,
+        title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text("${translate('Start on Boot')} (beta)"),
+          Text(
+              '* ${translate('Start the screen sharing service on boot, requires special permissions')}',
+              style: Theme.of(context).textTheme.bodySmall),
+        ]),
+        onToggle: (toValue) async {
+          if (toValue) {
+            // 1. request kIgnoreBatteryOptimizations
+            if (!await AndroidPermissionManager.check(
+                kRequestIgnoreBatteryOptimizations)) {
+              if (!await AndroidPermissionManager.request(
+                  kRequestIgnoreBatteryOptimizations)) {
+                return;
+              }
+            }
+
+            // 2. request kSystemAlertWindow
+            if (!await AndroidPermissionManager.check(kSystemAlertWindow)) {
+              if (!await AndroidPermissionManager.request(kSystemAlertWindow)) {
+                return;
+              }
+            }
+
+            // (Optional) 3. request input permission
+          }
+          setState(() => _enableStartOnBoot = toValue);
+
+          gFFI.invokeMethod(AndroidChannel.kSetStartOnBootOpt, toValue);
+        }));
 
     return SettingsList(
       sections: [
         SettingsSection(
-          title: Text(translate("Account")),
+          title: Text(translate('Account')),
           tiles: [
             SettingsTile.navigation(
               title: Obx(() => Text(gFFI.userModel.userName.value.isEmpty
-                  ? translate("Login")
-                  : '${translate("Logout")} (${gFFI.userModel.userName.value})')),
+                  ? translate('Login')
+                  : '${translate('Logout')} (${gFFI.userModel.userName.value})')),
               leading: Icon(Icons.person),
               onPressed: (context) {
                 if (gFFI.userModel.userName.value.isEmpty) {
-                  showLogin(gFFI.dialogManager);
+                  loginDialog();
                 } else {
                   gFFI.userModel.logOut();
                 }
@@ -322,8 +397,13 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                 showLanguageSettings(gFFI.dialogManager);
               }),
           SettingsTile.navigation(
-            title: Text(translate('Dark Theme')),
-            leading: Icon(Icons.dark_mode),
+            title: Text(translate(
+                Theme.of(context).brightness == Brightness.light
+                    ? 'Dark Theme'
+                    : 'Light Theme')),
+            leading: Icon(Theme.of(context).brightness == Brightness.light
+                ? Icons.dark_mode
+                : Icons.light_mode),
             onPressed: (context) {
               showThemeSettings(gFFI.dialogManager);
             },
@@ -387,21 +467,28 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
       ],
     );
   }
+
+  Future<bool> canStartOnBoot() async {
+    // start on boot depends on ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS and SYSTEM_ALERT_WINDOW
+    if (_hasIgnoreBattery && !_ignoreBatteryOpt) {
+      return false;
+    }
+    if (!await AndroidPermissionManager.check(kSystemAlertWindow)) {
+      return false;
+    }
+    return true;
+  }
 }
 
 void showServerSettings(OverlayDialogManager dialogManager) async {
   Map<String, dynamic> options = jsonDecode(await bind.mainGetOptions());
-  String id = options['custom-rendezvous-server'] ?? "";
-  String relay = options['relay-server'] ?? "";
-  String api = options['api-server'] ?? "";
-  String key = options['key'] ?? "";
-  showServerSettingsWithValue(id, relay, key, api, dialogManager);
+  showServerSettingsWithValue(ServerConfig.fromOptions(options), dialogManager);
 }
 
 void showLanguageSettings(OverlayDialogManager dialogManager) async {
   try {
     final langs = json.decode(await bind.mainGetLangs()) as List<dynamic>;
-    var lang = await bind.mainGetLocalOption(key: "lang");
+    var lang = bind.mainGetLocalOption(key: "lang");
     dialogManager.show((setState, close) {
       setLang(v) {
         if (lang != v) {
@@ -415,19 +502,18 @@ void showLanguageSettings(OverlayDialogManager dialogManager) async {
       }
 
       return CustomAlertDialog(
-          title: SizedBox.shrink(),
-          content: Column(
-            children: [
-                  getRadio('Default', '', lang, setLang),
-                  Divider(color: MyTheme.border),
-                ] +
-                langs.map((e) {
-                  final key = e[0] as String;
-                  final name = e[1] as String;
-                  return getRadio(name, key, lang, setLang);
-                }).toList(),
-          ),
-          actions: []);
+        content: Column(
+          children: [
+                getRadio('Default', '', lang, setLang),
+                Divider(color: MyTheme.border),
+              ] +
+              langs.map((e) {
+                final key = e[0] as String;
+                final name = e[1] as String;
+                return getRadio(name, key, lang, setLang);
+              }).toList(),
+        ),
+      );
     }, backDismiss: true, clickMaskDismiss: true);
   } catch (e) {
     //
@@ -449,14 +535,12 @@ void showThemeSettings(OverlayDialogManager dialogManager) async {
     }
 
     return CustomAlertDialog(
-        title: SizedBox.shrink(),
-        contentPadding: 10,
-        content: Column(children: [
-          getRadio('Light', ThemeMode.light, themeMode, setTheme),
-          getRadio('Dark', ThemeMode.dark, themeMode, setTheme),
-          getRadio('Follow System', ThemeMode.system, themeMode, setTheme)
-        ]),
-        actions: []);
+      content: Column(children: [
+        getRadio('Light', ThemeMode.light, themeMode, setTheme),
+        getRadio('Dark', ThemeMode.dark, themeMode, setTheme),
+        getRadio('Follow System', ThemeMode.system, themeMode, setTheme)
+      ]),
+    );
   }, backDismiss: true, clickMaskDismiss: true);
 }
 
@@ -484,78 +568,6 @@ void showAbout(OverlayDialogManager dialogManager) {
       actions: [],
     );
   }, clickMaskDismiss: true, backDismiss: true);
-}
-
-void showLogin(OverlayDialogManager dialogManager) {
-  final passwordController = TextEditingController();
-  final nameController = TextEditingController();
-  var loading = false;
-  var error = '';
-  dialogManager.show((setState, close) {
-    return CustomAlertDialog(
-      title: Text(translate('Login')),
-      content: Column(mainAxisSize: MainAxisSize.min, children: [
-        TextField(
-          autofocus: true,
-          autocorrect: false,
-          enableSuggestions: false,
-          keyboardType: TextInputType.visiblePassword,
-          decoration: InputDecoration(
-            labelText: translate('Username'),
-          ),
-          controller: nameController,
-        ),
-        PasswordWidget(controller: passwordController, autoFocus: false),
-      ]),
-      actions: (loading
-              ? <Widget>[CircularProgressIndicator()]
-              : (error != ""
-                  ? <Widget>[
-                      Text(translate(error),
-                          style: TextStyle(color: Colors.red))
-                    ]
-                  : <Widget>[])) +
-          <Widget>[
-            TextButton(
-              style: flatButtonStyle,
-              onPressed: loading
-                  ? null
-                  : () {
-                      close();
-                      setState(() {
-                        loading = false;
-                      });
-                    },
-              child: Text(translate('Cancel')),
-            ),
-            TextButton(
-              style: flatButtonStyle,
-              onPressed: loading
-                  ? null
-                  : () async {
-                      final name = nameController.text.trim();
-                      final pass = passwordController.text.trim();
-                      if (name != "" && pass != "") {
-                        setState(() {
-                          loading = true;
-                        });
-                        final resp = await gFFI.userModel.login(name, pass);
-                        setState(() {
-                          loading = false;
-                        });
-                        if (resp.containsKey('error')) {
-                          error = resp['error'];
-                          return;
-                        }
-                        gFFI.abModel.pullAb();
-                      }
-                      close();
-                    },
-              child: Text(translate('OK')),
-            ),
-          ],
-    );
-  });
 }
 
 class ScanButton extends StatelessWidget {

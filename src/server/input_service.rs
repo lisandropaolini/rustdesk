@@ -1,15 +1,32 @@
 use super::*;
+#[cfg(target_os = "linux")]
 use crate::common::IS_X11;
 #[cfg(target_os = "macos")]
 use dispatch::Queue;
 use enigo::{Enigo, Key, KeyboardControllable, MouseButton, MouseControllable};
 use hbb_common::{config::COMPRESS_LEVEL, get_time, protobuf::EnumOrUnknown};
-use rdev::{simulate, EventType, Key as RdevKey};
+use rdev::{self, EventType, Key as RdevKey, KeyCode, RawKey};
+#[cfg(target_os = "macos")]
+use rdev::{CGEventSourceStateID, CGEventTapLocation, VirtualInput};
 use std::{
     convert::TryFrom,
+    ops::Sub,
     sync::atomic::{AtomicBool, Ordering},
-    time::Instant,
+    thread,
+    time::{self, Duration, Instant},
 };
+#[cfg(target_os = "windows")]
+use winapi::um::winuser::{
+    ActivateKeyboardLayout, GetForegroundWindow, GetKeyboardLayout, GetWindowThreadProcessId,
+    VkKeyScanW,
+};
+
+const INVALID_CURSOR_POS: i32 = i32::MIN;
+
+#[cfg(target_os = "windows")]
+lazy_static::lazy_static! {
+    static ref LAST_HKL: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+}
 
 #[derive(Default)]
 struct StateCursor {
@@ -26,21 +43,42 @@ impl super::service::Reset for StateCursor {
     }
 }
 
-#[derive(Default)]
 struct StatePos {
     cursor_pos: (i32, i32),
 }
 
-impl super::service::Reset for StatePos {
-    fn reset(&mut self) {
-        self.cursor_pos = (0, 0);
+impl Default for StatePos {
+    fn default() -> Self {
+        Self {
+            cursor_pos: (INVALID_CURSOR_POS, INVALID_CURSOR_POS),
+        }
     }
 }
 
-#[derive(Default)]
+impl super::service::Reset for StatePos {
+    fn reset(&mut self) {
+        self.cursor_pos = (INVALID_CURSOR_POS, INVALID_CURSOR_POS);
+    }
+}
+
+impl StatePos {
+    #[inline]
+    fn is_valid(&self) -> bool {
+        self.cursor_pos.0 != INVALID_CURSOR_POS
+    }
+
+    #[inline]
+    fn is_moved(&self, x: i32, y: i32) -> bool {
+        self.is_valid() && (self.cursor_pos.0 != x || self.cursor_pos.1 != y)
+    }
+}
+
+#[derive(Default, Clone, Copy)]
 struct Input {
     conn: i32,
     time: i64,
+    x: i32,
+    y: i32,
 }
 
 const KEY_CHAR_START: u64 = 9999;
@@ -84,6 +122,119 @@ impl Subscriber for MouseCursorSub {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+struct LockModesHandler {
+    caps_lock_changed: bool,
+    num_lock_changed: bool,
+}
+
+#[cfg(target_os = "macos")]
+struct LockModesHandler;
+
+impl LockModesHandler {
+    #[inline]
+    fn is_modifier_enabled(key_event: &KeyEvent, modifier: ControlKey) -> bool {
+        key_event.modifiers.contains(&modifier.into())
+    }
+
+    #[inline]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    fn new_handler(key_event: &KeyEvent, _is_numpad_key: bool) -> Self {
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            Self::new(key_event, _is_numpad_key)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Self::new(key_event)
+        }
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn new(key_event: &KeyEvent, is_numpad_key: bool) -> Self {
+        let mut en = ENIGO.lock().unwrap();
+        let event_caps_enabled = Self::is_modifier_enabled(key_event, ControlKey::CapsLock);
+        let local_caps_enabled = en.get_key_state(enigo::Key::CapsLock);
+        let caps_lock_changed = event_caps_enabled != local_caps_enabled;
+        if caps_lock_changed {
+            en.key_click(enigo::Key::CapsLock);
+        }
+
+        let mut num_lock_changed = false;
+        if is_numpad_key {
+            let local_num_enabled = en.get_key_state(enigo::Key::NumLock);
+            let event_num_enabled = Self::is_modifier_enabled(key_event, ControlKey::NumLock);
+            num_lock_changed = event_num_enabled != local_num_enabled;
+        } else if is_legacy_mode(key_event) {
+            #[cfg(target_os = "windows")]
+            {
+                num_lock_changed =
+                    should_disable_numlock(key_event) && en.get_key_state(enigo::Key::NumLock);
+            }
+        }
+        if num_lock_changed {
+            en.key_click(enigo::Key::NumLock);
+        }
+
+        Self {
+            caps_lock_changed,
+            num_lock_changed,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn new(key_event: &KeyEvent) -> Self {
+        let event_caps_enabled = Self::is_modifier_enabled(key_event, ControlKey::CapsLock);
+        // Do not use the following code to detect `local_caps_enabled`.
+        // Because the state of get_key_state will not affect simuation of `VIRTUAL_INPUT_STATE` in this file.
+        //
+        // let local_caps_enabled = VirtualInput::get_key_state(
+        //     CGEventSourceStateID::CombinedSessionState,
+        //     rdev::kVK_CapsLock,
+        // );
+        let local_caps_enabled = unsafe {
+            let _lock = VIRTUAL_INPUT_MTX.lock();
+            VIRTUAL_INPUT_STATE
+                .as_ref()
+                .map_or(false, |input| input.capslock_down)
+        };
+        if event_caps_enabled && !local_caps_enabled {
+            press_capslock();
+        } else if !event_caps_enabled && local_caps_enabled {
+            release_capslock();
+        }
+
+        Self {}
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+impl Drop for LockModesHandler {
+    fn drop(&mut self) {
+        let mut en = ENIGO.lock().unwrap();
+        if self.caps_lock_changed {
+            en.key_click(enigo::Key::CapsLock);
+        }
+        if self.num_lock_changed {
+            en.key_click(enigo::Key::NumLock);
+        }
+    }
+}
+
+#[inline]
+#[cfg(target_os = "windows")]
+fn should_disable_numlock(evt: &KeyEvent) -> bool {
+    // disable numlock if press home etc when numlock is on,
+    // because we will get numpad value (7,8,9 etc) if not
+    match (&evt.union, evt.mode.enum_value_or(KeyboardMode::Legacy)) {
+        (Some(key_event::Union::ControlKey(ck)), KeyboardMode::Legacy) => {
+            return NUMPAD_KEY_MAP.contains_key(&ck.value());
+        }
+        _ => {}
+    }
+    false
+}
+
 pub const NAME_CURSOR: &'static str = "mouse_cursor";
 pub const NAME_POS: &'static str = "mouse_pos";
 pub type MouseCursorService = ServiceTmpl<MouseCursorSub>;
@@ -100,28 +251,39 @@ pub fn new_pos() -> GenericService {
     sp
 }
 
-fn run_pos(sp: GenericService, state: &mut StatePos) -> ResultType<()> {
-    if let Some((x, y)) = crate::get_cursor_pos() {
-        if state.cursor_pos.0 != x || state.cursor_pos.1 != y {
-            state.cursor_pos = (x, y);
-            let mut msg_out = Message::new();
-            msg_out.set_cursor_position(CursorPosition {
-                x,
-                y,
-                ..Default::default()
-            });
-            let exclude = {
-                let now = get_time();
-                let lock = LATEST_INPUT.lock().unwrap();
-                if now - lock.time < 300 {
-                    lock.conn
-                } else {
-                    0
-                }
-            };
-            sp.send_without(msg_out, exclude);
-        }
+#[inline]
+fn update_last_cursor_pos(x: i32, y: i32) {
+    let mut lock = LATEST_SYS_CURSOR_POS.lock().unwrap();
+    if lock.1 .0 != x || lock.1 .1 != y {
+        (lock.0, lock.1) = (Instant::now(), (x, y))
     }
+}
+
+fn run_pos(sp: GenericService, state: &mut StatePos) -> ResultType<()> {
+    let (_, (x, y)) = *LATEST_SYS_CURSOR_POS.lock().unwrap();
+    if x == INVALID_CURSOR_POS || y == INVALID_CURSOR_POS {
+        return Ok(());
+    }
+
+    if state.is_moved(x, y) {
+        let mut msg_out = Message::new();
+        msg_out.set_cursor_position(CursorPosition {
+            x,
+            y,
+            ..Default::default()
+        });
+        let exclude = {
+            let now = get_time();
+            let lock = LATEST_PEER_INPUT_CURSOR.lock().unwrap();
+            if now - lock.time < 300 {
+                lock.conn
+            } else {
+                0
+            }
+        };
+        sp.send_without(msg_out, exclude);
+    }
+    state.cursor_pos = (x, y);
 
     sp.snapshot(|sps| {
         let mut msg_out = Message::new();
@@ -165,14 +327,61 @@ fn run_cursor(sp: MouseCursorService, state: &mut StateCursor) -> ResultType<()>
     Ok(())
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+enum KeysDown {
+    RdevKey(RawKey),
+    EnigoKey(u64),
+}
+
 lazy_static::lazy_static! {
     static ref ENIGO: Arc<Mutex<Enigo>> = {
         Arc::new(Mutex::new(Enigo::new()))
     };
-    static ref KEYS_DOWN: Arc<Mutex<HashMap<u64, Instant>>> = Default::default();
-    static ref LATEST_INPUT: Arc<Mutex<Input>> = Default::default();
+    static ref KEYS_DOWN: Arc<Mutex<HashMap<KeysDown, Instant>>> = Default::default();
+    static ref LATEST_PEER_INPUT_CURSOR: Arc<Mutex<Input>> = Default::default();
+    static ref LATEST_SYS_CURSOR_POS: Arc<Mutex<(Instant, (i32, i32))>> = Arc::new(Mutex::new((Instant::now().sub(MOUSE_MOVE_PROTECTION_TIMEOUT), (INVALID_CURSOR_POS, INVALID_CURSOR_POS))));
 }
 static EXITING: AtomicBool = AtomicBool::new(false);
+
+const MOUSE_MOVE_PROTECTION_TIMEOUT: Duration = Duration::from_millis(1_000);
+// Actual diff of (x,y) is (1,1) here. But 5 may be tolerant.
+const MOUSE_ACTIVE_DISTANCE: i32 = 5;
+
+static RECORD_CURSOR_POS_RUNNING: AtomicBool = AtomicBool::new(false);
+
+pub fn try_start_record_cursor_pos() {
+    if RECORD_CURSOR_POS_RUNNING.load(Ordering::SeqCst) {
+        return;
+    }
+
+    RECORD_CURSOR_POS_RUNNING.store(true, Ordering::SeqCst);
+    thread::spawn(|| {
+        let interval = time::Duration::from_millis(33);
+        loop {
+            if !RECORD_CURSOR_POS_RUNNING.load(Ordering::SeqCst) {
+                break;
+            }
+
+            let now = time::Instant::now();
+            if let Some((x, y)) = crate::get_cursor_pos() {
+                update_last_cursor_pos(x, y);
+            }
+            let elapsed = now.elapsed();
+            if elapsed < interval {
+                thread::sleep(interval - elapsed);
+            }
+        }
+        update_last_cursor_pos(INVALID_CURSOR_POS, INVALID_CURSOR_POS);
+    });
+}
+
+pub fn try_stop_record_cursor_pos() {
+    let count_lock = CONN_COUNT.lock().unwrap();
+    if *count_lock > 0 {
+        return;
+    }
+    RECORD_CURSOR_POS_RUNNING.store(false, Ordering::SeqCst);
+}
 
 // mac key input must be run in main thread, otherwise crash on >= osx 10.15
 #[cfg(target_os = "macos")]
@@ -181,24 +390,78 @@ lazy_static::lazy_static! {
     static ref IS_SERVER: bool =  std::env::args().nth(1) == Some("--server".to_owned());
 }
 
+#[cfg(target_os = "macos")]
+struct VirtualInputState {
+    virtual_input: VirtualInput,
+    capslock_down: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl VirtualInputState {
+    fn new() -> Option<Self> {
+        VirtualInput::new(CGEventSourceStateID::Private, CGEventTapLocation::Session)
+            .map(|virtual_input| Self {
+                virtual_input,
+                capslock_down: false,
+            })
+            .ok()
+    }
+
+    #[inline]
+    fn simulate(&self, event_type: &EventType) -> ResultType<()> {
+        Ok(self.virtual_input.simulate(&event_type)?)
+    }
+}
+
+#[cfg(target_os = "macos")]
+static mut VIRTUAL_INPUT_MTX: Mutex<()> = Mutex::new(());
+#[cfg(target_os = "macos")]
+static mut VIRTUAL_INPUT_STATE: Option<VirtualInputState> = None;
+
+// First call set_uinput() will create keyboard and mouse clients.
+// The clients are ipc connections that must live shorter than tokio runtime.
+// Thus this function must not be called in a temporary runtime.
 #[cfg(target_os = "linux")]
-pub async fn set_uinput() -> ResultType<()> {
+pub async fn setup_uinput(minx: i32, maxx: i32, miny: i32, maxy: i32) -> ResultType<()> {
     // Keyboard and mouse both open /dev/uinput
     // TODO: Make sure there's no race
+    set_uinput_resolution(minx, maxx, miny, maxy).await?;
+
     let keyboard = super::uinput::client::UInputKeyboard::new().await?;
     log::info!("UInput keyboard created");
     let mouse = super::uinput::client::UInputMouse::new().await?;
     log::info!("UInput mouse created");
 
-    let xxx = ENIGO.lock();
-    let mut en = xxx.unwrap();
-    en.set_uinput_keyboard(Some(Box::new(keyboard)));
-    en.set_uinput_mouse(Some(Box::new(mouse)));
+    ENIGO
+        .lock()
+        .unwrap()
+        .set_custom_keyboard(Box::new(keyboard));
+    ENIGO.lock().unwrap().set_custom_mouse(Box::new(mouse));
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-pub async fn set_uinput_resolution(minx: i32, maxx: i32, miny: i32, maxy: i32) -> ResultType<()> {
+pub async fn update_mouse_resolution(minx: i32, maxx: i32, miny: i32, maxy: i32) -> ResultType<()> {
+    set_uinput_resolution(minx, maxx, miny, maxy).await?;
+
+    std::thread::spawn(|| {
+        if let Some(mouse) = ENIGO.lock().unwrap().get_custom_mouse() {
+            if let Some(mouse) = mouse
+                .as_mut_any()
+                .downcast_mut::<super::uinput::client::UInputMouse>()
+            {
+                allow_err!(mouse.send_refresh());
+            } else {
+                log::error!("failed downcast uinput mouse");
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+async fn set_uinput_resolution(minx: i32, maxx: i32, miny: i32, maxy: i32) -> ResultType<()> {
     super::uinput::client::set_resolution(minx, maxx, miny, maxy).await
 }
 
@@ -215,11 +478,22 @@ pub fn mouse_move_relative(x: i32, y: i32) {
     en.mouse_move_relative(x, y);
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 fn modifier_sleep() {
     // sleep for a while, this is only for keying in rdp in peer so far
-    #[cfg(windows)]
     std::thread::sleep(std::time::Duration::from_nanos(1));
+}
+
+#[inline]
+#[cfg(not(target_os = "macos"))]
+fn is_pressed(key: &Key, en: &mut Enigo) -> bool {
+    get_modifier_state(key.clone(), en)
+}
+
+#[inline]
+#[cfg(target_os = "macos")]
+fn key_sleep() {
+    std::thread::sleep(Duration::from_millis(20));
 }
 
 #[inline]
@@ -242,19 +516,35 @@ fn get_modifier_state(key: Key, en: &mut Enigo) -> bool {
 }
 
 pub fn handle_mouse(evt: &MouseEvent, conn: i32) {
+    if !active_mouse_(conn) {
+        return;
+    }
+    let evt_type = evt.mask & 0x7;
+    if evt_type == 0 {
+        let time = get_time();
+        *LATEST_PEER_INPUT_CURSOR.lock().unwrap() = Input {
+            time,
+            conn,
+            x: evt.x,
+            y: evt.y,
+        };
+    }
     #[cfg(target_os = "macos")]
     if !*IS_SERVER {
         // having GUI, run main GUI thread, otherwise crash
         let evt = evt.clone();
-        QUEUE.exec_async(move || handle_mouse_(&evt, conn));
+        QUEUE.exec_async(move || handle_mouse_(&evt));
         return;
     }
-    handle_mouse_(evt, conn);
+    #[cfg(windows)]
+    crate::portable_service::client::handle_mouse(evt);
+    #[cfg(not(windows))]
+    handle_mouse_(evt);
 }
 
 pub fn fix_key_down_timeout_loop() {
     std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_millis(1_000));
+        std::thread::sleep(std::time::Duration::from_millis(10_000));
         fix_key_down_timeout(false);
     });
     if let Err(err) = ctrlc::set_handler(move || {
@@ -275,38 +565,83 @@ pub fn fix_key_down_timeout_at_exit() {
 }
 
 #[inline]
-fn get_layout(key: u32) -> Key {
-    Key::Layout(std::char::from_u32(key).unwrap_or('\0'))
+#[cfg(target_os = "linux")]
+pub fn clear_remapped_keycode() {
+    ENIGO.lock().unwrap().tfc_clear_remapped();
+}
+
+#[inline]
+fn record_key_is_control_key(record_key: u64) -> bool {
+    record_key < KEY_CHAR_START
+}
+
+#[inline]
+fn record_key_is_chr(record_key: u64) -> bool {
+    record_key < KEY_CHAR_START
+}
+
+#[inline]
+fn record_key_to_key(record_key: u64) -> Option<Key> {
+    if record_key_is_control_key(record_key) {
+        control_key_value_to_key(record_key as _)
+    } else if record_key_is_chr(record_key) {
+        let chr: u32 = (record_key - KEY_CHAR_START) as _;
+        Some(char_value_to_key(chr))
+    } else {
+        None
+    }
+}
+
+pub fn release_device_modifiers() {
+    let mut en = ENIGO.lock().unwrap();
+    for modifier in [
+        Key::Shift,
+        Key::Control,
+        Key::Alt,
+        Key::Meta,
+        Key::RightShift,
+        Key::RightControl,
+        Key::RightAlt,
+        Key::RWin,
+    ] {
+        if get_modifier_state(modifier, &mut en) {
+            en.key_up(modifier);
+        }
+    }
+}
+
+#[inline]
+fn release_record_key(record_key: KeysDown) {
+    let func = move || match record_key {
+        KeysDown::RdevKey(raw_key) => {
+            simulate_(&EventType::KeyRelease(RdevKey::RawKey(raw_key)));
+        }
+        KeysDown::EnigoKey(key) => {
+            if let Some(key) = record_key_to_key(key) {
+                ENIGO.lock().unwrap().key_up(key);
+                log::debug!("Fixed {:?} timeout", key);
+            }
+        }
+    };
+
+    #[cfg(target_os = "macos")]
+    QUEUE.exec_async(func);
+    #[cfg(not(target_os = "macos"))]
+    func();
 }
 
 fn fix_key_down_timeout(force: bool) {
-    if KEYS_DOWN.lock().unwrap().is_empty() {
+    let key_down = KEYS_DOWN.lock().unwrap();
+    if key_down.is_empty() {
         return;
     }
-    let cloned = (*KEYS_DOWN.lock().unwrap()).clone();
-    for (key, value) in cloned.into_iter() {
-        if force || value.elapsed().as_millis() >= 360_000 {
-            KEYS_DOWN.lock().unwrap().remove(&key);
-            let key = if key < KEY_CHAR_START {
-                if let Some(key) = KEY_MAP.get(&(key as _)) {
-                    Some(*key)
-                } else {
-                    None
-                }
-            } else {
-                Some(get_layout((key - KEY_CHAR_START) as _))
-            };
-            if let Some(key) = key {
-                let func = move || {
-                    let mut en = ENIGO.lock().unwrap();
-                    en.key_up(key);
-                    log::debug!("Fixed {:?} timeout", key);
-                };
-                #[cfg(target_os = "macos")]
-                QUEUE.exec_async(func);
-                #[cfg(not(target_os = "macos"))]
-                func();
-            }
+    let cloned = (*key_down).clone();
+    drop(key_down);
+
+    for (record_key, time) in cloned.into_iter() {
+        if force || time.elapsed().as_millis() >= 360_000 {
+            record_pressed_key(record_key, false);
+            release_record_key(record_key);
         }
     }
 }
@@ -357,18 +692,58 @@ fn fix_modifiers(modifiers: &[EnumOrUnknown<ControlKey>], en: &mut Enigo, ck: i3
     }
 }
 
-fn handle_mouse_(evt: &MouseEvent, conn: i32) {
+fn active_mouse_(conn: i32) -> bool {
+    // out of time protection
+    if LATEST_SYS_CURSOR_POS.lock().unwrap().0.elapsed() > MOUSE_MOVE_PROTECTION_TIMEOUT {
+        return true;
+    }
+
+    // last conn input may be protected
+    if LATEST_PEER_INPUT_CURSOR.lock().unwrap().conn != conn {
+        return false;
+    }
+
+    let in_active_dist = |a: i32, b: i32| -> bool { (a - b).abs() < MOUSE_ACTIVE_DISTANCE };
+
+    // Check if input is in valid range
+    match crate::get_cursor_pos() {
+        Some((x, y)) => {
+            let (last_in_x, last_in_y) = {
+                let lock = LATEST_PEER_INPUT_CURSOR.lock().unwrap();
+                (lock.x, lock.y)
+            };
+            let mut can_active = in_active_dist(last_in_x, x) && in_active_dist(last_in_y, y);
+            // The cursor may not have been moved to last input position if system is busy now.
+            // While this is not a common case, we check it again after some time later.
+            if !can_active {
+                // 10 micros may be enough for system to move cursor.
+                // We do not care about the situation which system is too slow(more than 10 micros is required).
+                std::thread::sleep(std::time::Duration::from_micros(10));
+                // Sleep here can also somehow suppress delay accumulation.
+                if let Some((x2, y2)) = crate::get_cursor_pos() {
+                    can_active = in_active_dist(last_in_x, x2) && in_active_dist(last_in_y, y2);
+                }
+            }
+            if !can_active {
+                let mut lock = LATEST_PEER_INPUT_CURSOR.lock().unwrap();
+                lock.x = INVALID_CURSOR_POS / 2;
+                lock.y = INVALID_CURSOR_POS / 2;
+            }
+            can_active
+        }
+        None => true,
+    }
+}
+
+pub fn handle_mouse_(evt: &MouseEvent) {
     if EXITING.load(Ordering::SeqCst) {
         return;
     }
+
     #[cfg(windows)]
     crate::platform::windows::try_change_desktop();
     let buttons = evt.mask >> 3;
     let evt_type = evt.mask & 0x7;
-    if evt_type == 0 {
-        let time = get_time();
-        *LATEST_INPUT.lock().unwrap() = Input { time, conn };
-    }
     let mut en = ENIGO.lock().unwrap();
     #[cfg(not(target_os = "macos"))]
     let mut to_release = Vec::new();
@@ -384,6 +759,7 @@ fn handle_mouse_(evt: &MouseEvent, conn: i32) {
                 if key != &Key::CapsLock && key != &Key::NumLock {
                     if !get_modifier_state(key.clone(), &mut en) {
                         en.key_down(key.clone()).ok();
+                        #[cfg(windows)]
                         modifier_sleep();
                         to_release.push(key);
                     }
@@ -396,30 +772,42 @@ fn handle_mouse_(evt: &MouseEvent, conn: i32) {
             en.mouse_move_to(evt.x, evt.y);
         }
         1 => match buttons {
-            1 => {
+            0x01 => {
                 allow_err!(en.mouse_down(MouseButton::Left));
             }
-            2 => {
+            0x02 => {
                 allow_err!(en.mouse_down(MouseButton::Right));
             }
-            4 => {
+            0x04 => {
                 allow_err!(en.mouse_down(MouseButton::Middle));
+            }
+            0x08 => {
+                allow_err!(en.mouse_down(MouseButton::Back));
+            }
+            0x10 => {
+                allow_err!(en.mouse_down(MouseButton::Forward));
             }
             _ => {}
         },
         2 => match buttons {
-            1 => {
+            0x01 => {
                 en.mouse_up(MouseButton::Left);
             }
-            2 => {
+            0x02 => {
                 en.mouse_up(MouseButton::Right);
             }
-            4 => {
+            0x04 => {
                 en.mouse_up(MouseButton::Middle);
+            }
+            0x08 => {
+                en.mouse_up(MouseButton::Back);
+            }
+            0x10 => {
+                en.mouse_up(MouseButton::Forward);
             }
             _ => {}
         },
-        3 => {
+        3 | 4 => {
             #[allow(unused_mut)]
             let mut x = evt.x;
             #[allow(unused_mut)]
@@ -429,11 +817,39 @@ fn handle_mouse_(evt: &MouseEvent, conn: i32) {
                 x = -x;
                 y = -y;
             }
-            if x != 0 {
-                en.mouse_scroll_x(x);
+            #[cfg(target_os = "macos")]
+            {
+                // TODO: support track pad on win.
+                let is_track_pad = evt
+                    .modifiers
+                    .contains(&EnumOrUnknown::new(ControlKey::Scroll));
+
+                // fix shift + scroll(down/up)
+                if !is_track_pad
+                    && evt
+                        .modifiers
+                        .contains(&EnumOrUnknown::new(ControlKey::Shift))
+                {
+                    x = y;
+                    y = 0;
+                }
+
+                if x != 0 {
+                    en.mouse_scroll_x(x, is_track_pad);
+                }
+                if y != 0 {
+                    en.mouse_scroll_y(y, is_track_pad);
+                }
             }
-            if y != 0 {
-                en.mouse_scroll_y(y);
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                if x != 0 {
+                    en.mouse_scroll_x(x);
+                }
+                if y != 0 {
+                    en.mouse_scroll_y(y);
+                }
             }
         }
         _ => {}
@@ -494,7 +910,607 @@ pub async fn lock_screen() {
     super::video_service::switch_to_primary().await;
 }
 
+pub fn handle_key(evt: &KeyEvent) {
+    #[cfg(target_os = "macos")]
+    if !*IS_SERVER {
+        // having GUI, run main GUI thread, otherwise crash
+        let evt = evt.clone();
+        QUEUE.exec_async(move || handle_key_(&evt));
+        key_sleep();
+        return;
+    }
+    #[cfg(windows)]
+    crate::portable_service::client::handle_key(evt);
+    #[cfg(not(windows))]
+    handle_key_(evt);
+    #[cfg(target_os = "macos")]
+    key_sleep();
+}
+
+#[cfg(target_os = "macos")]
+#[inline]
+fn reset_input() {
+    unsafe {
+        let _lock = VIRTUAL_INPUT_MTX.lock();
+        VIRTUAL_INPUT_STATE = VirtualInputState::new();
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn reset_input_ondisconn() {
+    if !*IS_SERVER {
+        QUEUE.exec_async(reset_input);
+    } else {
+        reset_input();
+    }
+}
+
+fn sim_rdev_rawkey_position(code: KeyCode, keydown: bool) {
+    #[cfg(target_os = "windows")]
+    let rawkey = RawKey::ScanCode(code);
+    #[cfg(target_os = "linux")]
+    let rawkey = RawKey::LinuxXorgKeycode(code);
+    // // to-do: test android
+    // #[cfg(target_os = "android")]
+    // let rawkey = RawKey::LinuxConsoleKeycode(code);
+    #[cfg(target_os = "macos")]
+    let rawkey = RawKey::MacVirtualKeycode(code);
+
+    // map mode(1): Send keycode according to the peer platform.
+    record_pressed_key(KeysDown::RdevKey(rawkey), keydown);
+
+    let event_type = if keydown {
+        EventType::KeyPress(RdevKey::RawKey(rawkey))
+    } else {
+        EventType::KeyRelease(RdevKey::RawKey(rawkey))
+    };
+    simulate_(&event_type);
+}
+
+#[cfg(target_os = "windows")]
+fn sim_rdev_rawkey_virtual(code: u32, keydown: bool) {
+    let rawkey = RawKey::WinVirtualKeycode(code);
+    record_pressed_key(KeysDown::RdevKey(rawkey), keydown);
+    let event_type = if keydown {
+        EventType::KeyPress(RdevKey::RawKey(rawkey))
+    } else {
+        EventType::KeyRelease(RdevKey::RawKey(rawkey))
+    };
+    simulate_(&event_type);
+}
+
+#[inline]
+#[cfg(target_os = "macos")]
+fn simulate_(event_type: &EventType) {
+    unsafe {
+        let _lock = VIRTUAL_INPUT_MTX.lock();
+        if let Some(input) = &VIRTUAL_INPUT_STATE {
+            let _ = input.simulate(&event_type);
+        }
+    }
+}
+
+#[inline]
+#[cfg(target_os = "macos")]
+fn press_capslock() {
+    let caps_key = RdevKey::RawKey(rdev::RawKey::MacVirtualKeycode(rdev::kVK_CapsLock));
+    unsafe {
+        let _lock = VIRTUAL_INPUT_MTX.lock();
+        if let Some(input) = &mut VIRTUAL_INPUT_STATE {
+            if input.simulate(&EventType::KeyPress(caps_key)).is_ok() {
+                input.capslock_down = true;
+                key_sleep();
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[inline]
+fn release_capslock() {
+    let caps_key = RdevKey::RawKey(rdev::RawKey::MacVirtualKeycode(rdev::kVK_CapsLock));
+    unsafe {
+        let _lock = VIRTUAL_INPUT_MTX.lock();
+        if let Some(input) = &mut VIRTUAL_INPUT_STATE {
+            if input.simulate(&EventType::KeyRelease(caps_key)).is_ok() {
+                input.capslock_down = false;
+                key_sleep();
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[inline]
+fn simulate_(event_type: &EventType) {
+    match rdev::simulate(&event_type) {
+        Ok(()) => (),
+        Err(_simulate_error) => {
+            log::error!("Could not send {:?}", &event_type);
+        }
+    }
+}
+
+#[inline]
+fn control_key_value_to_key(value: i32) -> Option<Key> {
+    KEY_MAP.get(&value).and_then(|k| Some(*k))
+}
+
+#[inline]
+fn char_value_to_key(value: u32) -> Key {
+    Key::Layout(std::char::from_u32(value).unwrap_or('\0'))
+}
+
+fn map_keyboard_mode(evt: &KeyEvent) {
+    #[cfg(windows)]
+    crate::platform::windows::try_change_desktop();
+
+    // Wayland
+    #[cfg(target_os = "linux")]
+    if !*IS_X11 {
+        let mut en = ENIGO.lock().unwrap();
+        let code = evt.chr() as u16;
+
+        if evt.down {
+            en.key_down(enigo::Key::Raw(code)).ok();
+        } else {
+            en.key_up(enigo::Key::Raw(code));
+        }
+        return;
+    }
+
+    sim_rdev_rawkey_position(evt.chr() as _, evt.down);
+}
+
+#[cfg(target_os = "macos")]
+fn add_flags_to_enigo(en: &mut Enigo, key_event: &KeyEvent) {
+    // When long-pressed the command key, then press and release
+    // the Tab key, there should be CGEventFlagCommand in the flag.
+    en.reset_flag();
+    for ck in key_event.modifiers.iter() {
+        if let Some(key) = KEY_MAP.get(&ck.value()) {
+            en.add_flag(key);
+        }
+    }
+}
+
+fn get_control_key_value(key_event: &KeyEvent) -> i32 {
+    if let Some(key_event::Union::ControlKey(ck)) = key_event.union {
+        ck.value()
+    } else {
+        -1
+    }
+}
+
+fn release_unpressed_modifiers(en: &mut Enigo, key_event: &KeyEvent) {
+    let ck_value = get_control_key_value(key_event);
+    fix_modifiers(&key_event.modifiers[..], en, ck_value);
+}
+
+#[cfg(target_os = "linux")]
+fn is_altgr_pressed() -> bool {
+    let altgr_rawkey = RawKey::LinuxXorgKeycode(ControlKey::RAlt.value() as _);
+    KEYS_DOWN
+        .lock()
+        .unwrap()
+        .get(&KeysDown::RdevKey(altgr_rawkey))
+        .is_some()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn press_modifiers(en: &mut Enigo, key_event: &KeyEvent, to_release: &mut Vec<Key>) {
+    for ref ck in key_event.modifiers.iter() {
+        if let Some(key) = control_key_value_to_key(ck.value()) {
+            if !is_pressed(&key, en) {
+                #[cfg(target_os = "linux")]
+                if key == Key::Alt && is_altgr_pressed() {
+                    continue;
+                }
+                en.key_down(key.clone()).ok();
+                to_release.push(key.clone());
+                #[cfg(windows)]
+                modifier_sleep();
+            }
+        }
+    }
+}
+
+fn sync_modifiers(en: &mut Enigo, key_event: &KeyEvent, _to_release: &mut Vec<Key>) {
+    #[cfg(target_os = "macos")]
+    add_flags_to_enigo(en, key_event);
+
+    if key_event.down {
+        release_unpressed_modifiers(en, key_event);
+        #[cfg(not(target_os = "macos"))]
+        press_modifiers(en, key_event, _to_release);
+    }
+}
+
+fn process_control_key(en: &mut Enigo, ck: &EnumOrUnknown<ControlKey>, down: bool) {
+    if let Some(key) = control_key_value_to_key(ck.value()) {
+        if down {
+            en.key_down(key).ok();
+        } else {
+            en.key_up(key);
+        }
+    }
+}
+
+#[inline]
+fn need_to_uppercase(en: &mut Enigo) -> bool {
+    get_modifier_state(Key::Shift, en) || get_modifier_state(Key::CapsLock, en)
+}
+
+fn process_chr(en: &mut Enigo, chr: u32, down: bool) {
+    let key = char_value_to_key(chr);
+
+    if down {
+        if en.key_down(key).is_ok() {
+        } else {
+            if let Ok(chr) = char::try_from(chr) {
+                let mut s = chr.to_string();
+                if need_to_uppercase(en) {
+                    s = s.to_uppercase();
+                }
+                en.key_sequence(&s);
+            };
+        }
+    } else {
+        en.key_up(key);
+    }
+}
+
+fn process_unicode(en: &mut Enigo, chr: u32) {
+    if let Ok(chr) = char::try_from(chr) {
+        en.key_sequence(&chr.to_string());
+    }
+}
+
+fn process_seq(en: &mut Enigo, sequence: &str) {
+    en.key_sequence(&sequence);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn release_keys(en: &mut Enigo, to_release: &Vec<Key>) {
+    for key in to_release {
+        en.key_up(key.clone());
+    }
+}
+
+fn record_pressed_key(record_key: KeysDown, down: bool) {
+    let mut key_down = KEYS_DOWN.lock().unwrap();
+    if down {
+        key_down.insert(record_key, Instant::now());
+    } else {
+        key_down.remove(&record_key);
+    }
+}
+
+fn is_function_key(ck: &EnumOrUnknown<ControlKey>) -> bool {
+    let mut res = false;
+    if ck.value() == ControlKey::CtrlAltDel.value() {
+        // have to spawn new thread because send_sas is tokio_main, the caller can not be tokio_main.
+        std::thread::spawn(|| {
+            allow_err!(send_sas());
+        });
+        res = true;
+    } else if ck.value() == ControlKey::LockScreen.value() {
+        std::thread::spawn(|| {
+            lock_screen_2();
+        });
+        res = true;
+    }
+    return res;
+}
+
+fn legacy_keyboard_mode(evt: &KeyEvent) {
+    #[cfg(windows)]
+    crate::platform::windows::try_change_desktop();
+    let mut to_release: Vec<Key> = Vec::new();
+
+    let mut en = ENIGO.lock().unwrap();
+    sync_modifiers(&mut en, &evt, &mut to_release);
+
+    let down = evt.down;
+    match evt.union {
+        Some(key_event::Union::ControlKey(ck)) => {
+            if is_function_key(&ck) {
+                return;
+            }
+            let record_key = ck.value() as u64;
+            record_pressed_key(KeysDown::EnigoKey(record_key), down);
+            process_control_key(&mut en, &ck, down)
+        }
+        Some(key_event::Union::Chr(chr)) => {
+            let record_key = chr as u64 + KEY_CHAR_START;
+            record_pressed_key(KeysDown::EnigoKey(record_key), down);
+            process_chr(&mut en, chr, down)
+        }
+        Some(key_event::Union::Unicode(chr)) => process_unicode(&mut en, chr),
+        Some(key_event::Union::Seq(ref seq)) => process_seq(&mut en, seq),
+        _ => {}
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    release_keys(&mut en, &to_release);
+}
+
+#[cfg(target_os = "windows")]
+fn translate_process_code(code: u32, down: bool) {
+    crate::platform::windows::try_change_desktop();
+    match code >> 16 {
+        0 => sim_rdev_rawkey_position(code as _, down),
+        vk_code => sim_rdev_rawkey_virtual(vk_code, down),
+    };
+}
+
+#[cfg(target_os = "windows")]
+fn check_update_input_layout() {
+    unsafe {
+        let foreground_thread_id =
+            GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut());
+        let layout = GetKeyboardLayout(foreground_thread_id);
+        let layout_u32 = layout as u32;
+        let mut last_layout_lock = LAST_HKL.lock().unwrap();
+        if *last_layout_lock == 0 || *last_layout_lock != layout_u32 {
+            let res = ActivateKeyboardLayout(layout, 0);
+            if res == layout {
+                *last_layout_lock = layout_u32;
+            } else {
+                log::error!("Failed to call ActivateKeyboardLayout, {}", layout_u32);
+            }
+        }
+    }
+}
+
+fn translate_keyboard_mode(evt: &KeyEvent) {
+    // --server could not detect the input layout change.
+    // This is a temporary workaround.
+    //
+    // There may be a better way to detect and handle the input layout change.
+    // while ((bRet = GetMessage(&msg, NULL, 0, 0)) != 0)
+    // {
+    //     ...
+    //     if (msg.message == WM_INPUTLANGCHANGE)
+    //     {
+    //         // handle WM_INPUTLANGCHANGE message here
+    //         check_update_input_layout();
+    //     }
+    //     TranslateMessage(&msg);
+    //     DispatchMessage(&msg);
+    //     ...
+    // }
+    #[cfg(target_os = "windows")]
+    check_update_input_layout();
+
+    match &evt.union {
+        Some(key_event::Union::Seq(seq)) => {
+            // Fr -> US
+            // client: Shift + & => 1(send to remote)
+            // remote: Shift + 1 => !
+            //
+            // Try to release shift first.
+            // remote: Shift + 1 => 1
+            let mut en = ENIGO.lock().unwrap();
+
+            #[cfg(target_os = "macos")]
+            en.key_sequence(seq);
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            {
+                if get_modifier_state(Key::Shift, &mut en) {
+                    simulate_(&EventType::KeyRelease(RdevKey::ShiftLeft));
+                }
+                if get_modifier_state(Key::RightShift, &mut en) {
+                    simulate_(&EventType::KeyRelease(RdevKey::ShiftRight));
+                }
+                for chr in seq.chars() {
+                    #[cfg(target_os = "windows")]
+                    rdev::simulate_char(chr).ok();
+                    #[cfg(target_os = "linux")]
+                    en.key_click(Key::Layout(chr));
+                }
+            }
+        }
+        Some(key_event::Union::Chr(..)) => {
+            #[cfg(target_os = "windows")]
+            translate_process_code(evt.chr(), evt.down);
+            #[cfg(not(target_os = "windows"))]
+            sim_rdev_rawkey_position(evt.chr() as _, evt.down);
+        }
+        Some(key_event::Union::Unicode(..)) => {
+            // Do not handle unicode for now.
+        }
+        #[cfg(target_os = "windows")]
+        Some(key_event::Union::Win2winHotkey(code)) => {
+            simulate_win2win_hotkey(*code, evt.down);
+        }
+        _ => {
+            log::debug!("Unreachable. Unexpected key event {:?}", &evt);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn simulate_win2win_hotkey(code: u32, down: bool) {
+    let unicode: u16 = (code & 0x0000FFFF) as u16;
+    if down {
+        // Try convert unicode to virtual keycode first.
+        // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-vkkeyscanw
+        let res = unsafe { VkKeyScanW(unicode) };
+        if res as u16 != 0xFFFF {
+            let vk = res & 0x00FF;
+            let flag = res >> 8;
+            let modifiers = [rdev::Key::ShiftLeft, rdev::Key::ControlLeft, rdev::Key::Alt];
+            let mod_len = modifiers.len();
+            for pos in 0..mod_len {
+                if flag & (0x0001 << pos) != 0 {
+                    allow_err!(rdev::simulate(&EventType::KeyPress(modifiers[pos])));
+                }
+            }
+            allow_err!(rdev::simulate_code(Some(vk as _), None, true));
+            allow_err!(rdev::simulate_code(Some(vk as _), None, false));
+            for pos in 0..mod_len {
+                let rpos = mod_len - 1 - pos;
+                if flag & (0x0001 << rpos) != 0 {
+                    allow_err!(rdev::simulate(&EventType::KeyRelease(modifiers[rpos])));
+                }
+            }
+            return;
+        }
+    }
+
+    let keycode: u16 = ((code >> 16) & 0x0000FFFF) as u16;
+    allow_err!(rdev::simulate_code(Some(keycode), None, down));
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn skip_led_sync_control_key(_key: &ControlKey) -> bool {
+    false
+}
+
+// LockModesHandler should not be created when single meta is pressing and releasing.
+// Because the drop function may insert "CapsLock Click" and "NumLock Click", which breaks single meta click.
+// https://github.com/rustdesk/rustdesk/issues/3928#issuecomment-1496936687
+// https://github.com/rustdesk/rustdesk/issues/3928#issuecomment-1500415822
+// https://github.com/rustdesk/rustdesk/issues/3928#issuecomment-1500773473
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn skip_led_sync_control_key(key: &ControlKey) -> bool {
+    matches!(
+        key,
+        ControlKey::Control
+            | ControlKey::RControl
+            | ControlKey::Meta
+            | ControlKey::Shift
+            | ControlKey::RShift
+            | ControlKey::Alt
+            | ControlKey::RAlt
+            | ControlKey::Tab
+            | ControlKey::Return
+    )
+}
+
+#[inline]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn is_numpad_control_key(key: &ControlKey) -> bool {
+    matches!(
+        key,
+        ControlKey::Numpad0
+            | ControlKey::Numpad1
+            | ControlKey::Numpad2
+            | ControlKey::Numpad3
+            | ControlKey::Numpad4
+            | ControlKey::Numpad5
+            | ControlKey::Numpad6
+            | ControlKey::Numpad7
+            | ControlKey::Numpad8
+            | ControlKey::Numpad9
+            | ControlKey::NumpadEnter
+    )
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn skip_led_sync_rdev_key(_key: &RdevKey) -> bool {
+    false
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn skip_led_sync_rdev_key(key: &RdevKey) -> bool {
+    matches!(
+        key,
+        RdevKey::ControlLeft
+            | RdevKey::ControlRight
+            | RdevKey::MetaLeft
+            | RdevKey::MetaRight
+            | RdevKey::ShiftLeft
+            | RdevKey::ShiftRight
+            | RdevKey::Alt
+            | RdevKey::AltGr
+            | RdevKey::Tab
+            | RdevKey::Return
+    )
+}
+
+#[inline]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn is_legacy_mode(evt: &KeyEvent) -> bool {
+    evt.mode.enum_value_or(KeyboardMode::Legacy) == KeyboardMode::Legacy
+}
+
+pub fn handle_key_(evt: &KeyEvent) {
+    if EXITING.load(Ordering::SeqCst) {
+        return;
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let mut _lock_mode_handler = None;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    match &evt.union {
+        Some(key_event::Union::Unicode(..)) | Some(key_event::Union::Seq(..)) => {
+            _lock_mode_handler = Some(LockModesHandler::new_handler(&evt, false));
+        }
+        Some(key_event::Union::ControlKey(ck)) => {
+            let key = ck.enum_value_or(ControlKey::Unknown);
+            if !skip_led_sync_control_key(&key) {
+                #[cfg(target_os = "macos")]
+                let is_numpad_key = false;
+                #[cfg(any(target_os = "windows", target_os = "linux"))]
+                let is_numpad_key = is_numpad_control_key(&key);
+                _lock_mode_handler = Some(LockModesHandler::new_handler(&evt, is_numpad_key));
+            }
+        }
+        Some(key_event::Union::Chr(code)) => {
+            if is_legacy_mode(&evt) {
+                _lock_mode_handler = Some(LockModesHandler::new_handler(evt, false));
+            } else {
+                let key = crate::keyboard::keycode_to_rdev_key(*code);
+                if !skip_led_sync_rdev_key(&key) {
+                    #[cfg(target_os = "macos")]
+                    let is_numpad_key = false;
+                    #[cfg(any(target_os = "windows", target_os = "linux"))]
+                    let is_numpad_key = crate::keyboard::is_numpad_rdev_key(&key);
+                    _lock_mode_handler = Some(LockModesHandler::new_handler(evt, is_numpad_key));
+                }
+            }
+        }
+        _ => {}
+    };
+
+    match evt.mode.unwrap() {
+        KeyboardMode::Map => {
+            map_keyboard_mode(evt);
+        }
+        KeyboardMode::Translate => {
+            translate_keyboard_mode(evt);
+        }
+        _ => {
+            legacy_keyboard_mode(evt);
+        }
+    }
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn lock_screen_2() {
+    lock_screen().await;
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn send_sas() -> ResultType<()> {
+    let mut stream = crate::ipc::connect(1000, crate::POSTFIX_SERVICE).await?;
+    timeout(1000, stream.send(&crate::ipc::Data::SAS)).await??;
+    Ok(())
+}
+
 lazy_static::lazy_static! {
+    static ref MODIFIER_MAP: HashMap<i32, Key> = [
+        (ControlKey::Alt, Key::Alt),
+        (ControlKey::RAlt, Key::RightAlt),
+        (ControlKey::Control, Key::Control),
+        (ControlKey::RControl, Key::RightControl),
+        (ControlKey::Shift, Key::Shift),
+        (ControlKey::RShift, Key::RightShift),
+        (ControlKey::Meta, Key::Meta),
+        (ControlKey::RWin, Key::RWin),
+    ].iter().map(|(a, b)| (a.value(), b.clone())).collect();
     static ref KEY_MAP: HashMap<i32, Key> =
     [
         (ControlKey::Alt, Key::Alt),
@@ -586,344 +1602,4 @@ lazy_static::lazy_static! {
         (ControlKey::Insert, true),
         (ControlKey::Delete, true),
     ].iter().map(|(a, b)| (a.value(), b.clone())).collect();
-}
-
-pub fn handle_key(evt: &KeyEvent) {
-    #[cfg(target_os = "macos")]
-    if !*IS_SERVER {
-        // having GUI, run main GUI thread, otherwise crash
-        let evt = evt.clone();
-        QUEUE.exec_async(move || handle_key_(&evt));
-        return;
-    }
-    handle_key_(evt);
-}
-
-fn rdev_key_down_or_up(key: RdevKey, down_or_up: bool) {
-    let event_type = match down_or_up {
-        true => EventType::KeyPress(key),
-        false => EventType::KeyRelease(key),
-    };
-    let delay = std::time::Duration::from_millis(20);
-    match simulate(&event_type) {
-        Ok(()) => (),
-        Err(_simulate_error) => {
-            log::error!("Could not send {:?}", &event_type);
-        }
-    }
-    // Let ths OS catchup (at least MacOS)
-    std::thread::sleep(delay);
-}
-
-fn rdev_key_click(key: RdevKey) {
-    rdev_key_down_or_up(key, true);
-    rdev_key_down_or_up(key, false);
-}
-
-fn sync_status(evt: &KeyEvent) -> (bool, bool) {
-    let mut en = ENIGO.lock().unwrap();
-
-    // remote caps status
-    let caps_locking = evt
-        .modifiers
-        .iter()
-        .position(|&r| r == ControlKey::CapsLock.into())
-        .is_some();
-    // remote numpad status
-    let num_locking = evt
-        .modifiers
-        .iter()
-        .position(|&r| r == ControlKey::NumLock.into())
-        .is_some();
-
-    let click_capslock = (caps_locking && !en.get_key_state(enigo::Key::CapsLock))
-        || (!caps_locking && en.get_key_state(enigo::Key::CapsLock));
-    let click_numlock = (num_locking && !en.get_key_state(enigo::Key::NumLock))
-        || (!num_locking && en.get_key_state(enigo::Key::NumLock));
-    #[cfg(windows)]
-    let click_numlock = {
-        let code = evt.chr();
-        let key = rdev::get_win_key(code, 0);
-        match key {
-            RdevKey::Home |
-            RdevKey::UpArrow |
-            RdevKey::PageUp |
-            RdevKey::LeftArrow |
-            RdevKey::RightArrow |
-            RdevKey::End |
-            RdevKey::DownArrow |
-            RdevKey::PageDown |
-            RdevKey::Insert | 
-            RdevKey::Delete => en.get_key_state(enigo::Key::NumLock),
-            _ => click_numlock,
-        }
-    };   
-    return (click_capslock, click_numlock);
-}
-
-fn map_keyboard_mode(evt: &KeyEvent) {
-    // map mode(1): Send keycode according to the peer platform.
-    #[cfg(windows)]
-    crate::platform::windows::try_change_desktop();
-
-    let (click_capslock, click_numlock) = sync_status(evt);
-
-    // Wayland
-    #[cfg(target_os = "linux")]
-    if !*IS_X11.lock().unwrap() {
-        let mut en = ENIGO.lock().unwrap();
-        let code = evt.chr() as u16;
-
-        #[cfg(not(target_os = "macos"))]
-        if click_capslock {
-            en.key_click(enigo::Key::CapsLock);
-        }
-        #[cfg(not(target_os = "macos"))]
-        if click_numlock {
-            en.key_click(enigo::Key::NumLock);
-        }
-        #[cfg(target_os = "macos")]
-        en.key_down(enigo::Key::CapsLock);
-
-        if evt.down {
-            en.key_down(enigo::Key::Raw(code)).ok();
-        } else {
-            en.key_up(enigo::Key::Raw(code));
-        }
-        return;
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    if click_capslock {
-        rdev_key_click(RdevKey::CapsLock);
-    }
-    #[cfg(not(target_os = "macos"))]
-    if click_numlock {
-        rdev_key_click(RdevKey::NumLock);
-    }
-    #[cfg(target_os = "macos")]
-    if evt.down && click_capslock {
-        rdev_key_down_or_up(RdevKey::CapsLock, evt.down);
-    }
-
-    rdev_key_down_or_up(RdevKey::Unknown(evt.chr()), evt.down);
-    return;
-}
-
-fn legacy_keyboard_mode(evt: &KeyEvent) {
-    let (click_capslock, click_numlock) = sync_status(evt);
-
-    #[cfg(windows)]
-    crate::platform::windows::try_change_desktop();
-    let mut en = ENIGO.lock().unwrap();
-    if click_capslock {
-        en.key_click(Key::CapsLock);
-    }
-    if click_numlock {
-        en.key_click(Key::NumLock);
-    }
-    // disable numlock if press home etc when numlock is on,
-    // because we will get numpad value (7,8,9 etc) if not
-    #[cfg(windows)]
-    let mut _disable_numlock = false;
-    #[cfg(target_os = "macos")]
-    en.reset_flag();
-    // When long-pressed the command key, then press and release
-    // the Tab key, there should be CGEventFlagCommand in the flag.
-    #[cfg(target_os = "macos")]
-    for ck in evt.modifiers.iter() {
-        if let Some(key) = KEY_MAP.get(&ck.value()) {
-            en.add_flag(key);
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    let mut to_release = Vec::new();
-
-    if evt.down {
-        let ck = if let Some(key_event::Union::ControlKey(ck)) = evt.union {
-            ck.value()
-        } else {
-            -1
-        };
-        fix_modifiers(&evt.modifiers[..], &mut en, ck);
-        for ref ck in evt.modifiers.iter() {
-            if let Some(key) = KEY_MAP.get(&ck.value()) {
-                #[cfg(target_os = "linux")]
-                if key == &Key::Alt && !get_modifier_state(key.clone(), &mut en) {
-                    // for AltGr on Linux
-                    if KEYS_DOWN
-                        .lock()
-                        .unwrap()
-                        .get(&(ControlKey::RAlt.value() as _))
-                        .is_some()
-                    {
-                        continue;
-                    }
-                }
-                #[cfg(not(target_os = "macos"))]
-                if !get_modifier_state(key.clone(), &mut en) {
-                    en.key_down(key.clone()).ok();
-                    modifier_sleep();
-                    to_release.push(key);
-                }
-            }
-        }
-    }
-
-    match evt.union {
-        Some(key_event::Union::ControlKey(ck)) => {
-            if let Some(key) = KEY_MAP.get(&ck.value()) {
-                #[cfg(windows)]
-                if let Some(_) = NUMPAD_KEY_MAP.get(&ck.value()) {
-                    _disable_numlock = en.get_key_state(Key::NumLock);
-                    if _disable_numlock {
-                        en.key_down(Key::NumLock).ok();
-                        en.key_up(Key::NumLock);
-                    }
-                }
-                if evt.down {
-                    en.key_down(key.clone()).ok();
-                    KEYS_DOWN
-                        .lock()
-                        .unwrap()
-                        .insert(ck.value() as _, Instant::now());
-                } else {
-                    en.key_up(key.clone());
-                    KEYS_DOWN.lock().unwrap().remove(&(ck.value() as _));
-                }
-            } else if ck.value() == ControlKey::CtrlAltDel.value() {
-                // have to spawn new thread because send_sas is tokio_main, the caller can not be tokio_main.
-                std::thread::spawn(|| {
-                    allow_err!(send_sas());
-                });
-            } else if ck.value() == ControlKey::LockScreen.value() {
-                lock_screen_2();
-            }
-        }
-        Some(key_event::Union::Chr(chr)) => {
-            if evt.down {
-                if en.key_down(get_layout(chr)).is_ok() {
-                    KEYS_DOWN
-                        .lock()
-                        .unwrap()
-                        .insert(chr as u64 + KEY_CHAR_START, Instant::now());
-                } else {
-                    if let Ok(chr) = char::try_from(chr) {
-                        let mut x = chr.to_string();
-                        if get_modifier_state(Key::Shift, &mut en)
-                            || get_modifier_state(Key::CapsLock, &mut en)
-                        {
-                            x = x.to_uppercase();
-                        }
-                        en.key_sequence(&x);
-                    }
-                }
-                KEYS_DOWN
-                    .lock()
-                    .unwrap()
-                    .insert(chr as u64 + KEY_CHAR_START, Instant::now());
-            } else {
-                en.key_up(get_layout(chr));
-                KEYS_DOWN
-                    .lock()
-                    .unwrap()
-                    .remove(&(chr as u64 + KEY_CHAR_START));
-            }
-        }
-        Some(key_event::Union::Unicode(chr)) => {
-            if let Ok(chr) = char::try_from(chr) {
-                en.key_sequence(&chr.to_string());
-            }
-        }
-        Some(key_event::Union::Seq(ref seq)) => {
-            en.key_sequence(&seq);
-        }
-        _ => {}
-    }
-    #[cfg(not(target_os = "macos"))]
-    for key in to_release {
-        en.key_up(key.clone());
-    }
-}
-
-fn handle_key_(evt: &KeyEvent) {
-    if EXITING.load(Ordering::SeqCst) {
-        return;
-    }
-
-    match evt.mode.unwrap() {
-        KeyboardMode::Legacy => {
-            legacy_keyboard_mode(evt);
-        }
-        KeyboardMode::Map => {
-            map_keyboard_mode(evt);
-        }
-        KeyboardMode::Translate => {
-            legacy_keyboard_mode(evt);
-        }
-        _ => {
-            legacy_keyboard_mode(evt);
-        }
-    }
-}
-
-#[tokio::main(flavor = "current_thread")]
-async fn lock_screen_2() {
-    lock_screen().await;
-}
-
-#[tokio::main(flavor = "current_thread")]
-async fn send_sas() -> ResultType<()> {
-    let mut stream = crate::ipc::connect(1000, crate::POSTFIX_SERVICE).await?;
-    timeout(1000, stream.send(&crate::ipc::Data::SAS)).await??;
-    Ok(())
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use rdev::{listen, Event, EventType, Key};
-    use std::sync::mpsc;
-
-    #[test]
-    fn test_handle_key() {
-        // listen
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            std::env::set_var("KEYBOARD_ONLY", "y");
-            let func = move |event: Event| {
-                tx.send(event).ok();
-            };
-            if let Err(error) = listen(func) {
-                println!("Error: {:?}", error);
-            }
-        });
-        // set key/char base on char
-        let mut evt = KeyEvent::new();
-        evt.set_chr(66);
-        evt.mode = KeyboardMode::Legacy.into();
-
-        evt.modifiers.push(ControlKey::CapsLock.into());
-
-        // press
-        evt.down = true;
-        handle_key(&evt);
-        if let Ok(listen_evt) = rx.recv() {
-            assert_eq!(listen_evt.event_type, EventType::KeyPress(Key::Num1))
-        }
-        // release
-        evt.down = false;
-        handle_key(&evt);
-        if let Ok(listen_evt) = rx.recv() {
-            assert_eq!(listen_evt.event_type, EventType::KeyRelease(Key::Num1))
-        }
-    }
-    #[test]
-    fn test_get_key_state() {
-        let mut en = ENIGO.lock().unwrap();
-        println!(
-            "[*] test_get_key_state: {:?}",
-            en.get_key_state(enigo::Key::NumLock)
-        );
-    }
 }

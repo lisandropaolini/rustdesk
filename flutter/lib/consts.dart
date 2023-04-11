@@ -1,23 +1,45 @@
-import 'package:flutter/material.dart';
 import 'dart:io';
 
-const double kDesktopRemoteTabBarHeight = 28.0;
+import 'package:flutter/material.dart';
+import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/models/state_model.dart';
 
-/// [kAppTypeMain] used by 'Desktop Main Page' , 'Mobile (Client and Server)' , 'Desktop CM Page', "Install Page"
+const double kDesktopRemoteTabBarHeight = 28.0;
+const int kMainWindowId = 0;
+
+const String kPeerPlatformWindows = "Windows";
+const String kPeerPlatformLinux = "Linux";
+const String kPeerPlatformMacOS = "Mac OS";
+const String kPeerPlatformAndroid = "Android";
+
+/// [kAppTypeMain] used by 'Desktop Main Page' , 'Mobile (Client and Server)', "Install Page"
 const String kAppTypeMain = "main";
+
+/// [kAppTypeConnectionManager] only for 'Desktop CM Page'
+const String kAppTypeConnectionManager = "cm";
+
 const String kAppTypeDesktopRemote = "remote";
 const String kAppTypeDesktopFileTransfer = "file transfer";
 const String kAppTypeDesktopPortForward = "port forward";
 
+const String kWindowMainWindowOnTop = "main_window_on_top";
+const String kWindowGetWindowInfo = "get_window_info";
+const String kWindowDisableGrabKeyboard = "disable_grab_keyboard";
 const String kWindowActionRebuild = "rebuild";
+const String kWindowEventHide = "hide";
+const String kWindowEventShow = "show";
+const String kWindowConnect = "connect";
 
 const String kUniLinksPrefix = "rustdesk://";
-const String kActionNewConnection = "connection/new/";
 
 const String kTabLabelHomePage = "Home";
 const String kTabLabelSettingPage = "Settings";
 
 const String kWindowPrefix = "wm_";
+const int kWindowMainId = 0;
+
+// the executable name of the portable version
+const String kEnvPortableExecutable = "RUSTDESK_APPNAME";
 
 const Color kColorWarn = Color.fromARGB(255, 245, 133, 59);
 
@@ -33,6 +55,26 @@ const int kMobileMaxDisplayHeight = 1280;
 const int kDesktopMaxDisplayWidth = 1920;
 const int kDesktopMaxDisplayHeight = 1080;
 
+const double kDesktopFileTransferNameColWidth = 200;
+const double kDesktopFileTransferModifiedColWidth = 120;
+const double kDesktopFileTransferMinimumWidth = 100;
+const double kDesktopFileTransferMaximumWidth = 300;
+const double kDesktopFileTransferRowHeight = 30.0;
+const double kDesktopFileTransferHeaderHeight = 25.0;
+
+EdgeInsets get kDragToResizeAreaPadding =>
+    !kUseCompatibleUiMode && Platform.isLinux
+        ? stateGlobal.fullscreen || stateGlobal.maximize
+            ? EdgeInsets.zero
+            : EdgeInsets.all(5.0)
+        : EdgeInsets.zero;
+// https://en.wikipedia.org/wiki/Non-breaking_space
+const int $nbsp = 0x00A0;
+
+extension StringExtension on String {
+  String get nonBreaking => replaceAll(' ', String.fromCharCode($nbsp));
+}
+
 const Size kConnectionManagerWindowSize = Size(300, 400);
 // Tabbar transition duration, now we remove the duration
 const Duration kTabTransitionDuration = Duration.zero;
@@ -40,20 +82,82 @@ const double kEmptyMarginTop = 50;
 const double kDesktopIconButtonSplashRadius = 20;
 
 /// [kMinCursorSize] indicates min cursor (w, h)
-const int kMinCursorSize = 24;
+const int kMinCursorSize = 12;
 
 /// [kDefaultScrollAmountMultiplier] indicates how many rows can be scrolled after a minimum scroll action of mouse
 const kDefaultScrollAmountMultiplier = 5.0;
 const kDefaultScrollDuration = Duration(milliseconds: 50);
 const kDefaultMouseWheelThrottleDuration = Duration(milliseconds: 50);
 const kFullScreenEdgeSize = 0.0;
+const kMaximizeEdgeSize = 0.0;
 var kWindowEdgeSize = Platform.isWindows ? 1.0 : 5.0;
 const kWindowBorderWidth = 1.0;
 const kDesktopMenuPadding = EdgeInsets.only(left: 12.0, right: 3.0);
 
-const kInvalidValueStr = "InvalidValueStr";
+const kInvalidValueStr = 'InvalidValueStr';
+
+// Config key shared by flutter and other ui.
+const kCommConfKeyTheme = 'theme';
+const kCommConfKeyLang = 'lang';
 
 const kMobilePageConstraints = BoxConstraints(maxWidth: 600);
+
+/// [kMouseControlDistance] indicates the distance that self-side move to get control of mouse.
+const kMouseControlDistance = 12;
+
+/// [kMouseControlTimeoutMSec] indicates the timeout (in milliseconds) that self-side can get control of mouse.
+const kMouseControlTimeoutMSec = 1000;
+
+/// [kRemoteViewStyleOriginal] Show remote image without scaling.
+const kRemoteViewStyleOriginal = 'original';
+
+/// [kRemoteViewStyleAdaptive] Show remote image scaling by ratio factor.
+const kRemoteViewStyleAdaptive = 'adaptive';
+
+/// [kRemoteScrollStyleAuto] Scroll image auto by position.
+const kRemoteScrollStyleAuto = 'scrollauto';
+
+/// [kRemoteScrollStyleBar] Scroll image with scroll bar.
+const kRemoteScrollStyleBar = 'scrollbar';
+
+/// [kRemoteImageQualityBest] Best image quality.
+const kRemoteImageQualityBest = 'best';
+
+/// [kRemoteImageQualityBalanced] Balanced image quality, mid performance.
+const kRemoteImageQualityBalanced = 'balanced';
+
+/// [kRemoteImageQualityLow] Low image quality, better performance.
+const kRemoteImageQualityLow = 'low';
+
+/// [kRemoteImageQualityCustom] Custom image quality.
+const kRemoteImageQualityCustom = 'custom';
+
+/// [kRemoteAudioGuestToHost] Guest to host audio mode(default).
+const kRemoteAudioGuestToHost = 'guest-to-host';
+
+/// [kRemoteAudioDualWay] dual-way audio mode(default).
+const kRemoteAudioDualWay = 'dual-way';
+
+const kIgnoreDpi = true;
+
+/// Android constants
+const kActionApplicationDetailsSettings =
+    "android.settings.APPLICATION_DETAILS_SETTINGS";
+const kActionAccessibilitySettings = "android.settings.ACCESSIBILITY_SETTINGS";
+
+const kRecordAudio = "android.permission.RECORD_AUDIO";
+const kManageExternalStorage = "android.permission.MANAGE_EXTERNAL_STORAGE";
+const kRequestIgnoreBatteryOptimizations =
+    "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS";
+const kSystemAlertWindow = "android.permission.SYSTEM_ALERT_WINDOW";
+
+/// Android channel invoke type key
+class AndroidChannel {
+  static final kStartAction = "start_action";
+  static final kGetStartOnBootOpt = "get_start_on_boot_opt";
+  static final kSetStartOnBootOpt = "set_start_on_boot_opt";
+  static final kSyncAppDirConfigPath = "sync_app_dir";
+}
 
 /// flutter/packages/flutter/lib/src/services/keyboard_key.dart -> _keyLabels
 /// see [LogicalKeyboardKey.keyLabel]
@@ -284,3 +388,20 @@ const Map<int, String> physicalKeyMap = <int, String>{
   0x000c019e: 'LOCK_SCREEN',
   0x000c0208: 'VK_PRINT',
 };
+
+/// The windows targets in the publish time order.
+enum WindowsTarget {
+  naw, // not a windows target
+  xp,
+  vista,
+  w7,
+  w8,
+  w8_1,
+  w10,
+  w11
+}
+
+/// A convenient method to transform a build number to the corresponding windows version.
+extension WindowsTargetExt on int {
+  WindowsTarget get windowsVersion => getWindowsTarget(this);
+}

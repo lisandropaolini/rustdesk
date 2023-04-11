@@ -1,9 +1,14 @@
+import 'dart:async';
+
 import 'package:dash_chat_2/dash_chat_2.dart';
 import 'package:draggable_float_widget/draggable_float_widget.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
+import 'package:get/get_rx/src/rx_types/rx_types.dart';
+import 'package:get/get.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../consts.dart';
 import '../common.dart';
 import '../common/widgets/overlay.dart';
 import 'model.dart';
@@ -25,30 +30,46 @@ class MessageBody {
 class ChatModel with ChangeNotifier {
   static final clientModeID = -1;
 
-  /// _overlayState:
-  /// Desktop: store session overlay by using [setOverlayState].
-  /// Mobile: always null, use global overlay.
-  /// see [_getOverlayState] in [showChatIconOverlay] or [showChatWindowOverlay]
-  OverlayState? _overlayState;
   OverlayEntry? chatIconOverlayEntry;
   OverlayEntry? chatWindowOverlayEntry;
 
+  bool isConnManager = false;
+
+  RxBool isWindowFocus = true.obs;
+  BlockableOverlayState? _blockableOverlayState;
+  final Rx<VoiceCallStatus> _voiceCallStatus = Rx(VoiceCallStatus.notStarted);
+
+  Rx<VoiceCallStatus> get voiceCallStatus => _voiceCallStatus;
+
   final ChatUser me = ChatUser(
     id: "",
-    firstName: "Me",
+    firstName: translate("Me"),
   );
 
-  late final Map<int, MessageBody> _messages = Map()
-    ..[clientModeID] = MessageBody(me, []);
+  late final Map<int, MessageBody> _messages = {}..[clientModeID] =
+      MessageBody(me, []);
 
   var _currentID = clientModeID;
-  late bool _isShowChatPage = false;
+  late bool _isShowCMChatPage = false;
 
   Map<int, MessageBody> get messages => _messages;
 
   int get currentID => _currentID;
 
-  bool get isShowChatPage => _isShowChatPage;
+  bool get isShowCMChatPage => _isShowCMChatPage;
+
+  void setOverlayState(BlockableOverlayState blockableOverlayState) {
+    _blockableOverlayState = blockableOverlayState;
+
+    _blockableOverlayState!.addMiddleBlockedListener((v) {
+      if (!v) {
+        isWindowFocus.value = false;
+        if (isWindowFocus.value) {
+          isWindowFocus.toggle();
+        }
+      }
+    });
+  }
 
   final WeakReference<FFI> parent;
 
@@ -66,20 +87,6 @@ class ChatModel with ChangeNotifier {
     }
   }
 
-  setOverlayState(OverlayState? os) {
-    _overlayState = os;
-  }
-
-  OverlayState? _getOverlayState() {
-    if (_overlayState == null) {
-      if (globalKey.currentState == null ||
-          globalKey.currentState!.overlay == null) return null;
-      return globalKey.currentState!.overlay;
-    } else {
-      return _overlayState;
-    }
-  }
-
   showChatIconOverlay({Offset offset = const Offset(200, 50)}) {
     if (chatIconOverlayEntry != null) {
       chatIconOverlayEntry!.remove();
@@ -92,7 +99,7 @@ class ChatModel with ChangeNotifier {
       }
     }
 
-    final overlayState = _getOverlayState();
+    final overlayState = _blockableOverlayState?.state;
     if (overlayState == null) return;
 
     final overlay = OverlayEntry(builder: (context) {
@@ -124,40 +131,66 @@ class ChatModel with ChangeNotifier {
     }
   }
 
-  showChatWindowOverlay() {
+  showChatWindowOverlay({Offset? chatInitPos}) {
     if (chatWindowOverlayEntry != null) return;
-    final overlayState = _getOverlayState();
+    isWindowFocus.value = true;
+    _blockableOverlayState?.setMiddleBlocked(true);
+
+    final overlayState = _blockableOverlayState?.state;
     if (overlayState == null) return;
     final overlay = OverlayEntry(builder: (context) {
-      return DraggableChatWindow(
-          position: const Offset(20, 80),
-          width: 250,
-          height: 350,
-          chatModel: this);
+      return Listener(
+          onPointerDown: (_) {
+            if (!isWindowFocus.value) {
+              isWindowFocus.value = true;
+              _blockableOverlayState?.setMiddleBlocked(true);
+            }
+          },
+          child: DraggableChatWindow(
+              position: chatInitPos ?? Offset(20, 80),
+              width: 250,
+              height: 350,
+              chatModel: this));
     });
     overlayState.insert(overlay);
     chatWindowOverlayEntry = overlay;
+    requestChatInputFocus();
   }
 
   hideChatWindowOverlay() {
     if (chatWindowOverlayEntry != null) {
+      _blockableOverlayState?.setMiddleBlocked(false);
       chatWindowOverlayEntry!.remove();
       chatWindowOverlayEntry = null;
       return;
     }
   }
 
-  toggleChatOverlay() {
-    if ((!isDesktop && chatIconOverlayEntry == null) ||
-        chatWindowOverlayEntry == null) {
+  _isChatOverlayHide() => ((!isDesktop && chatIconOverlayEntry == null) ||
+      chatWindowOverlayEntry == null);
+
+  toggleChatOverlay({Offset? chatInitPos}) {
+    if (_isChatOverlayHide()) {
       gFFI.invokeMethod("enable_soft_keyboard", true);
       if (!isDesktop) {
         showChatIconOverlay();
       }
-      showChatWindowOverlay();
+      showChatWindowOverlay(chatInitPos: chatInitPos);
     } else {
       hideChatIconOverlay();
       hideChatWindowOverlay();
+    }
+  }
+
+  showChatPage(int id) async {
+    if (isConnManager) {
+      if (!_isShowCMChatPage) {
+        await toggleCMChatPage(id);
+      }
+    } else {
+      if (_isChatOverlayHide()) {
+        await toggleChatOverlay();
+      }
     }
   }
 
@@ -165,16 +198,17 @@ class ChatModel with ChangeNotifier {
     if (gFFI.chatModel.currentID != id) {
       gFFI.chatModel.changeCurrentID(id);
     }
-    if (_isShowChatPage) {
-      _isShowChatPage = !_isShowChatPage;
+    if (_isShowCMChatPage) {
+      _isShowCMChatPage = !_isShowCMChatPage;
       notifyListeners();
-      await windowManager.setSize(Size(300, 400));
-      await windowManager.setAlignment(Alignment.topRight);
+      await windowManager.show();
+      await windowManager.setSizeAlignment(
+          kConnectionManagerWindowSize, Alignment.topRight);
     } else {
-      await windowManager.setSize(Size(600, 400));
-      await Future.delayed(Duration(milliseconds: 100));
-      await windowManager.setAlignment(Alignment.topRight);
-      _isShowChatPage = !_isShowChatPage;
+      requestChatInputFocus();
+      await windowManager.show();
+      await windowManager.setSizeAlignment(Size(600, 400), Alignment.topRight);
+      _isShowCMChatPage = !_isShowCMChatPage;
       notifyListeners();
     }
   }
@@ -208,13 +242,11 @@ class ChatModel with ChangeNotifier {
     }
     if (text.isEmpty) return;
     // mobile: first message show overlay icon
-    if (chatIconOverlayEntry == null) {
+    if (!isDesktop && chatIconOverlayEntry == null) {
       showChatIconOverlay();
     }
-    // desktop: show chat page
-    if (!_isShowChatPage) {
-      toggleCMChatPage(id);
-    }
+    // show chat page
+    await showChatPage(id);
 
     int toId = currentID;
 
@@ -271,11 +303,48 @@ class ChatModel with ChangeNotifier {
   close() {
     hideChatIconOverlay();
     hideChatWindowOverlay();
-    _overlayState = null;
     notifyListeners();
   }
 
   resetClientMode() {
     _messages[clientModeID]?.clear();
   }
+
+  void requestChatInputFocus() {
+    Timer(Duration(milliseconds: 100), () {
+      if (inputNode.hasListeners && inputNode.canRequestFocus) {
+        inputNode.requestFocus();
+      }
+    });
+  }
+
+  void onVoiceCallWaiting() {
+    _voiceCallStatus.value = VoiceCallStatus.waitingForResponse;
+  }
+
+  void onVoiceCallStarted() {
+    _voiceCallStatus.value = VoiceCallStatus.connected;
+  }
+
+  void onVoiceCallClosed(String reason) {
+    _voiceCallStatus.value = VoiceCallStatus.notStarted;
+  }
+
+  void onVoiceCallIncoming() {
+    if (isConnManager) {
+      _voiceCallStatus.value = VoiceCallStatus.incoming;
+    }
+  }
+
+  void closeVoiceCall(String id) {
+    bind.sessionCloseVoiceCall(id: id);
+  }
+}
+
+enum VoiceCallStatus {
+  notStarted,
+  waitingForResponse,
+  connected,
+  // Connection manager only.
+  incoming
 }
