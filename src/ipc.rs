@@ -193,7 +193,7 @@ pub enum Data {
 #[tokio::main(flavor = "current_thread")]
 pub async fn start(postfix: &str) -> ResultType<()> {
 
-    info!("pass located PASSWORD --> {}", password::temporary_password());
+    info!("pass located PASSWORD ---> {}", password::temporary_password());
 
     let mut incoming = new_listener(postfix).await?;
     loop {
