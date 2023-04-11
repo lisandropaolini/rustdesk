@@ -7,6 +7,7 @@ use parity_tokio_ipc::{
     Connection as Conn, ConnectionClient as ConnClient, Endpoint, Incoming, SecurityAttributes,
 };
 use serde_derive::{Deserialize, Serialize};
+use log::{info};
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub use clipboard::ClipbaordFile;
@@ -191,6 +192,9 @@ pub enum Data {
 
 #[tokio::main(flavor = "current_thread")]
 pub async fn start(postfix: &str) -> ResultType<()> {
+
+    info!("pass located xxxxxxxxxxxxxxxxxxxx: {}", password::temporary_password());
+
     let mut incoming = new_listener(postfix).await?;
     loop {
         if let Some(result) = incoming.next().await {
@@ -233,6 +237,9 @@ pub async fn new_listener(postfix: &str) -> ResultType<Incoming> {
     match endpoint.incoming() {
         Ok(incoming) => {
             log::info!("Started ipc{} server at path: {}", postfix, &path);
+
+            
+
             #[cfg(not(windows))]
             {
                 use std::os::unix::fs::PermissionsExt;
